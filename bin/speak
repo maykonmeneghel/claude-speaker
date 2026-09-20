@@ -19,6 +19,8 @@
   speak set <key> <value>   change one config key
   speak daemon <start|stop|restart|status>
   speak doctor              end-to-end diagnosis of the pipeline
+  speak shortcuts [install|uninstall|status]
+                            personal /speaker-* commands, no plugin prefix
 """
 
 from __future__ import annotations
@@ -429,6 +431,15 @@ def cmd_doctor(_args: list[str]) -> int:
     return 0 if ok else 1
 
 
+def cmd_shortcuts(args: list[str]) -> int:
+    """Install/remove the unprefixed /speaker-* personal commands."""
+    script = Path(__file__).resolve().parent / "shortcuts"
+    if not script.exists():
+        print("shortcuts helper not found next to this script")
+        return 1
+    return subprocess.call([sys.executable, str(script), *args])
+
+
 COMMANDS = {
     "status": cmd_status, "on": cmd_on, "off": cmd_off, "stop": cmd_stop,
     "auto": cmd_auto, "default": cmd_default, "note": cmd_note,
@@ -436,6 +447,7 @@ COMMANDS = {
     "test": cmd_test, "queue": cmd_queue, "clear": cmd_clear, "setup": cmd_setup,
     "voices": cmd_voices, "voice": cmd_voice, "config": cmd_config, "set": cmd_set,
     "daemon": cmd_daemon, "log": cmd_log, "doctor": cmd_doctor,
+    "shortcuts": cmd_shortcuts,
 }
 
 

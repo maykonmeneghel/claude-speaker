@@ -1,6 +1,6 @@
 {
-  "name": "claude-speaker",
-  "version": "0.2.0",
+  "name": "speaker",
+  "version": "0.3.0",
   "description": "Gives Claude Code a voice, one session at a time: each session decides whether it speaks, and what it speaks is a short summary with the decisions left to you, played through ElevenLabs when that terminal tab regains focus.",
   "author": {
     "name": "Maykon Meneghel"
@@ -13,5 +13,6 @@
     "notifications",
     "macos"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "homepage": "https://github.com/maykonmeneghel/claude-speaker"
 }

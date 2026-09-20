@@ -5,11 +5,11 @@
   },
   "metadata": {
     "description": "Local marketplace for personal Claude Code plugins",
-    "version": "0.1.1"
+    "version": "0.2.0"
   },
   "plugins": [
     {
-      "name": "claude-speaker",
+      "name": "speaker",
       "displayName": "Claude Speaker",
       "description": "Speaks Claude's last message through ElevenLabs when the terminal tab of that session regains focus",
       "source": "./"

@@ -28,7 +28,7 @@ SessionStart hook ──► speakerd (one daemon, all sessions)
 
 ```bash
 claude plugin marketplace add maykonmeneghel/claude-speaker
-claude plugin install claude-speaker@meneghel-local
+claude plugin install speaker@meneghel-local
 ```
 
 Or, from a local clone:
@@ -36,15 +36,15 @@ Or, from a local clone:
 ```bash
 git clone https://github.com/maykonmeneghel/claude-speaker.git ~/claude-speaker
 claude plugin marketplace add ~/claude-speaker
-claude plugin install claude-speaker@meneghel-local
+claude plugin install speaker@meneghel-local
 ```
 
 Then, inside Claude Code:
 
 ```
-/claude-speaker:speaker-setup <your-elevenlabs-key>   # stores it in the login keychain
-/claude-speaker:speaker-doctor                        # end-to-end check
-/claude-speaker:speaker-test                          # hear the voice now
+/speaker:setup <your-elevenlabs-key>   # stores it in the login keychain
+/speaker:doctor                        # end-to-end check
+/speaker:test                          # hear the voice now
 ```
 
 The key goes into the macOS keychain (service `claude-speaker-elevenlabs`), or
@@ -59,15 +59,29 @@ front", which speaks in the wrong tab when several sessions run side by side.
 
 | Command | What it does |
 | --- | --- |
-| `/claude-speaker:speaker-status` | engine, voice, daemon, focused tab, pending queue |
-| `/claude-speaker:speaker-on` / `-off` | speak / stay quiet **in this session**; add `--global` for all |
-| `/claude-speaker:speaker-sessions` | every known session and whether it speaks |
-| `/claude-speaker:speaker-summary [smart\|full\|manual]` | how much of each answer is spoken |
-| `/claude-speaker:speaker-stop` | stop the audio playing right now |
-| `/claude-speaker:speaker-test [text]` | speak immediately, ignoring focus |
-| `/claude-speaker:speaker-voices` | list the voices on the account |
-| `/claude-speaker:speaker-setup` | store the API key and pick a voice |
-| `/claude-speaker:speaker-doctor` | diagnose key, tty, focus, daemon, hooks |
+| `/speaker:status` | engine, voice, daemon, focused tab, pending queue |
+| `/speaker:on` / `/speaker:off` | speak / stay quiet **in this session**; add `--global` for all |
+| `/speaker:sessions` | every known session and whether it speaks |
+| `/speaker:summary [smart\|full\|manual]` | how much of each answer is spoken |
+| `/speaker:stop` | stop the audio playing right now |
+| `/speaker:test [text]` | speak immediately, ignoring focus |
+| `/speaker:voices` | list the voices on the account |
+| `/speaker:setup` | store the API key and pick a voice |
+| `/speaker:doctor` | diagnose key, tty, focus, daemon, hooks |
+| `/speaker:shortcuts [install\|uninstall]` | the same commands as `/speaker-*`, without the prefix |
+
+### Without the `speaker:` prefix
+
+Plugin commands are namespaced, so they read `/speaker:on`. If you would rather
+type `/speaker-on`, install personal copies into `~/.claude/commands`:
+
+```
+/speaker:shortcuts install     # or: speak shortcuts install
+```
+
+Both forms then work. `speak shortcuts uninstall` removes them again — it only
+deletes files this plugin generated, so a command of yours with the same name is
+left alone.
 
 The same things work from a shell, without Claude: `~/claude-speaker/bin/speak status`,
 `speak queue "texto"`, `speak set max_chars 400`, `speak log 50`, `speak daemon restart`.
