@@ -153,12 +153,20 @@ def main() -> int:
 
                 core.log(f"speaking session={item.get('session_id','?')[:8]} "
                          f"kind={item.get('kind')} tty={item.get('tty')} chars={len(text)}")
-                result = core.speak_blocking(text, cfg, still_focused)
+                result = core.speak_blocking(text, cfg, still_focused,
+                                             session_id=item.get("session_id", ""))
                 last_activity = time.time()
 
-                if result == "done":
+                if result in ("done", "cancelled"):
                     core.drop_queue_item(item)
+                    if result == "cancelled":
+                        core.log("playback cut by a new prompt, item counted as spoken")
                 elif result == "aborted" and attempts < 3:
+                    # A retry must never resurrect an item something else dropped
+                    # in the meantime — writing the file back would recreate it.
+                    if not Path(item["_path"]).exists():
+                        core.log("playback aborted, but the item is already gone")
+                        continue
                     item["attempts"] = attempts
                     try:
                         Path(item["_path"]).write_text(

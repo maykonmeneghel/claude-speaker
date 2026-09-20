@@ -56,6 +56,8 @@ DEFAULT_CONFIG = {
     "notifications": True,
     "speak_when_focused": True,
     "stop_on_blur": True,
+    # submitting a new prompt cuts whatever this session is still saying
+    "stop_on_prompt": True,
     "prefetch": True,
     # focus detection: auto | tty | app
     "focus_strategy": "auto",
@@ -856,25 +858,74 @@ def play_say(text: str, cfg: dict) -> subprocess.Popen | None:
         return None
 
 
-def speak_blocking(text: str, cfg: dict | None = None, should_continue=None) -> str:
-    """Speak `text`; returns 'done', 'aborted' or 'failed'.
-    `should_continue` is polled while audio plays (used to stop on blur)."""
+def request_cancel(session_id: str) -> None:
+    """Record that what this session is being told is no longer wanted.
+
+    A timestamp rather than a flag, so an utterance that starts *after* the
+    request is left alone: only playback older than the mark is cut."""
+    if not session_id:
+        return
+    ensure_dirs()
+    path = session_file(session_id)
+    data = read_session(session_id)
+    data["session_id"] = session_id
+    data["cancel_at"] = time.time()
+    try:
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        return
+    _private(path)
+
+
+def cancel_requested(session_id: str, since: float) -> bool:
+    """Whether this session asked to be quiet after `since`."""
+    if not session_id:
+        return False
+    try:
+        return float(read_session(session_id).get("cancel_at", 0)) > since
+    except (TypeError, ValueError):
+        return False
+
+
+def _end_playback(proc) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def speak_blocking(text: str, cfg: dict | None = None, should_continue=None,
+                   session_id: str = "") -> str:
+    """Speak `text`; returns 'done', 'cancelled', 'aborted' or 'failed'.
+
+    `should_continue` is polled while audio plays (used to stop on blur).
+    `session_id` lets the session cut its own playback mid-sentence: the daemon
+    owns this process, so a new prompt only has to leave a mark for it to read —
+    nothing has to go hunting for players to kill."""
     cfg = cfg or load_config()
     audio = synthesize(text, cfg)
     proc = play_file(audio, cfg) if audio else play_say(text, cfg)
     if proc is None:
         return "failed"
-    NOW_PLAYING.write_text(json.dumps({"pid": proc.pid, "started_at": time.time()}),
-                           encoding="utf-8")
+    started_at = time.time()
+    NOW_PLAYING.write_text(
+        json.dumps({"pid": proc.pid, "started_at": started_at,
+                    "session_id": session_id}),
+        encoding="utf-8")
+    _private(NOW_PLAYING)
+    last_poll = started_at
     try:
         while proc.poll() is None:
             if should_continue and not should_continue():
-                proc.terminate()
-                try:
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+                _end_playback(proc)
                 return "aborted"
+            now = time.time()
+            if session_id and now - last_poll >= 0.25:
+                last_poll = now
+                if cancel_requested(session_id, started_at):
+                    _end_playback(proc)
+                    return "cancelled"
             time.sleep(0.15)
     finally:
         NOW_PLAYING.unlink(missing_ok=True)
