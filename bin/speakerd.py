@@ -46,22 +46,41 @@ def acquire_pidfile() -> bool:
     return True
 
 
+def supersedes(newer: dict, older: dict) -> bool:
+    """Whether `newer` replaces `older`, both queued by the same session.
+
+    Newest wins, with one exception: a notification carries a generic line
+    ("Claude is waiting for your input"), so it must never discard an answer
+    summary that has not been spoken yet — the summary is the whole point."""
+    if older.get("kind") == "stop" and newer.get("kind") != "stop":
+        return False
+    return True
+
+
 def pick_items(items: list[dict], cfg: dict, kind: str, tty: str) -> list[dict]:
     """Items whose terminal tab is currently in front, oldest first.
-    With queue_policy=latest only the newest item per session survives."""
+    With queue_policy=latest only one item per session survives."""
     focused = [it for it in items if core.item_has_focus(it, cfg, kind, tty)]
     if not focused:
         return []
     if cfg.get("queue_policy", "latest") != "latest":
         return focused
     keep: dict[str, dict] = {}
-    for it in focused:
+    for it in focused:  # oldest first, so `it` is always the newer of the pair
         sid = it.get("session_id", "?")
         previous = keep.get(sid)
-        if previous is not None:
-            core.drop_queue_item(previous)  # superseded: Claude spoke again since
-            core.log(f"dropped superseded item for session={sid[:8]}")
-        keep[sid] = it
+        if previous is None:
+            keep[sid] = it
+            continue
+        if supersedes(it, previous):
+            core.drop_queue_item(previous)
+            core.log(f"dropped superseded {previous.get('kind', '?')} item "
+                     f"for session={sid[:8]}")
+            keep[sid] = it
+        else:
+            core.drop_queue_item(it)
+            core.log(f"dropped {it.get('kind', '?')} item for session={sid[:8]}: "
+                     f"an unspoken summary outranks it")
     return list(keep.values())
 
 

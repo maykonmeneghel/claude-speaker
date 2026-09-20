@@ -15,7 +15,16 @@ Stop hook ──► queue item (text + tty of the session)
 SessionStart hook ──► speakerd (one daemon, all sessions)
                       │  polls: which terminal tab is in front?
                       └──► tab tty == item tty ──► ElevenLabs ──► afplay
+
+UserPromptSubmit hook ──► drops that session's unspoken summary (you are back)
 ```
+
+A queued summary only stays worth hearing while you are away. Two rules keep it
+from describing the wrong turn: a notification — a generic "waiting for your
+input" line — never supersedes a summary that has not been spoken yet, and
+submitting a new prompt drops that session's pending summary outright, since
+you are demonstrably back and asking about something else. A pending permission
+notification survives, because it is still true.
 
 ## Requirements
 
@@ -207,7 +216,7 @@ the note and speaks it instead of the answer. Code blocks and tables never reach
 | `summary_chars` | `420` | cap for the summary modes |
 | `session_default` | `on` | what a session does before anyone runs `speak on`/`off` in it |
 | `pin_ttl_days` | `30` | how long the pin of an ended session is kept for a resume; `0` keeps it forever |
-| `queue_policy` | `latest` | `latest` speaks only the newest message per session; `all` speaks every one |
+| `queue_policy` | `latest` | `latest` speaks only the newest message per session, except that a notification never discards an unspoken summary; `all` speaks every one |
 | `notifications` | `true` | also speak permission prompts and idle notifications |
 | `speak_when_focused` | `true` | `false` = only speak messages produced while the tab was *not* in front |
 | `stop_on_blur` | `true` | leaving the tab interrupts the audio (it retries on return, up to 3×) |
