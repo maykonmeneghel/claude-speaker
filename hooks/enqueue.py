@@ -4,6 +4,7 @@
 Usage (from hooks.json):
     python3 enqueue.py stop          # Stop / SubagentStop payload on stdin
     python3 enqueue.py notification  # Notification payload on stdin
+    python3 enqueue.py prompt        # UserPromptSubmit: forget what is stale
 
 The hook never blocks Claude: it always exits 0 and stays silent on stdout.
 """
@@ -92,6 +93,21 @@ def main() -> int:
     session_id = payload.get("session_id") or os.environ.get("CLAUDE_SESSION_ID", "unknown")
     short = session_id[:8]
     cfg = core.load_config()
+
+    if mode == "prompt":
+        # The user is back and has asked something new, so a summary of an
+        # earlier turn that never got spoken is stale: saying it now describes
+        # the wrong question. Notifications are left alone — a pending
+        # permission prompt is still true.
+        dropped = 0
+        for item in core.list_queue():
+            if item.get("session_id") == session_id and item.get("kind") == "stop":
+                core.drop_queue_item(item)
+                dropped += 1
+        if dropped:
+            core.log(f"prompt hook: session={short} dropped {dropped} stale "
+                     f"summary(ies), the user is back")
+        return 0
 
     if not core.enabled(session_id):
         core.log(f"{mode} hook: session={short} not speaking "
