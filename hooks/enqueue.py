@@ -99,6 +99,11 @@ def main() -> int:
         # earlier turn that never got spoken is stale: saying it now describes
         # the wrong question. Notifications are left alone — a pending
         # permission prompt is still true.
+        if cfg.get("stop_on_prompt", True):
+            # Cut what is playing right now too. This is only a mark on the
+            # session; the daemon owns the player and ends it on its next poll,
+            # so nothing here kills audio that does not belong to the plugin.
+            core.request_cancel(session_id)
         dropped = 0
         for item in core.list_queue():
             if item.get("session_id") == session_id and item.get("kind") == "stop":

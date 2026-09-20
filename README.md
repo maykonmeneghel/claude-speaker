@@ -16,15 +16,27 @@ SessionStart hook ──► speakerd (one daemon, all sessions)
                       │  polls: which terminal tab is in front?
                       └──► tab tty == item tty ──► ElevenLabs ──► afplay
 
-UserPromptSubmit hook ──► drops that session's unspoken summary (you are back)
+UserPromptSubmit hook ──► cuts what is playing, drops what is unspoken
 ```
 
-A queued summary only stays worth hearing while you are away. Two rules keep it
-from describing the wrong turn: a notification — a generic "waiting for your
-input" line — never supersedes a summary that has not been spoken yet, and
+A queued summary only stays worth hearing while you are away. Three rules keep
+it from describing the wrong turn: a notification — a generic "waiting for your
+input" line — never supersedes a summary that has not been spoken yet;
 submitting a new prompt drops that session's pending summary outright, since
-you are demonstrably back and asking about something else. A pending permission
-notification survives, because it is still true.
+you are demonstrably back and asking about something else; and that same prompt
+cuts a summary already being spoken, mid-sentence, counting it as heard rather
+than retrying it later. A pending permission notification survives all three,
+because it is still true.
+
+Cutting costs nothing and touches nothing else on the machine: the daemon owns
+the player it started, so the session only leaves a timestamp for it to read on
+its next poll — at most a quarter of a second. The mark is a timestamp and not
+a flag precisely so that an utterance which begins *after* you hit Enter is
+left alone. Set `stop_on_prompt` to `false` to let every summary finish.
+
+Claude Code has no hook on a keystroke, so the earliest moment anything can
+react to you is `UserPromptSubmit`, which fires when the prompt is submitted —
+not while you type it.
 
 ## Requirements
 
@@ -220,6 +232,7 @@ the note and speaks it instead of the answer. Code blocks and tables never reach
 | `notifications` | `true` | also speak permission prompts and idle notifications |
 | `speak_when_focused` | `true` | `false` = only speak messages produced while the tab was *not* in front |
 | `stop_on_blur` | `true` | leaving the tab interrupts the audio (it retries on return, up to 3×) |
+| `stop_on_prompt` | `true` | submitting a new prompt cuts what this session is saying, and counts it as spoken |
 | `prefetch` | `true` | synthesize at Stop time so playback is instant when you come back |
 | `focus_strategy` | `auto` | `tty` (exact tab, needs AppleScript) / `app` (terminal app in front) |
 | `poll_interval` | `0.6` | seconds between focus checks |

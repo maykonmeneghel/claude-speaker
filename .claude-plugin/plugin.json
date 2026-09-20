@@ -1,6 +1,6 @@
 {
   "name": "speaker",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Gives Claude Code a voice, one session at a time: each session decides whether it speaks, and what it speaks is a short summary with the decisions left to you, played through ElevenLabs when that terminal tab regains focus.",
   "author": {
     "name": "Maykon Meneghel"
