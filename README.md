@@ -17,6 +17,7 @@ SessionStart hook ──► speakerd (one daemon, all sessions)
                       └──► tab tty == item tty ──► ElevenLabs ──► afplay
 
 UserPromptSubmit hook ──► cuts what is playing, drops what is unspoken
+                     └──► queues a short "got it" so the turn starts out loud
 microphone goes live ──► cuts mid-sentence (dictation must not hear the voice)
 ```
 
@@ -232,6 +233,18 @@ comes back is dropped after `pin_ttl_days` (30). `speak sessions` shows those as
 | `full` | the whole answer, capped at `max_chars` (700) |
 | `manual` | nothing, unless Claude left a line with `speak note "..."` |
 
+Separately from the modes, a prompt is acknowledged the moment it is submitted:
+a one-line "Ok, deixa comigo" while the turn gets going, so a long answer does
+not feel like nothing was heard. The line is drawn at random from
+`ack_phrases` — the built-in set follows `language_code` — never repeating the
+one before it. Nothing is synthesized in the hook, which runs before Claude
+sees the prompt: the daemon speaks it a moment later, and from the mp3 cache
+once each phrase has been heard once, so a fixed set of lines is billed once
+and never again. An acknowledgement older than `ack_ttl_seconds` (20) is
+dropped unspoken, because arriving late it says the opposite of what it means,
+and a real summary always outranks one still waiting. Set `ack` to `false` to
+turn it off.
+
 `speak note "texto"` always wins for the turn it was written in: the Stop hook consumes
 the note and speaks it instead of the answer. Code blocks and tables never reach the voice.
 
@@ -257,6 +270,9 @@ the note and speaks it instead of the answer. Code blocks and tables never reach
 | `stop_on_blur` | `true` | leaving the tab interrupts the audio (it retries on return, up to 3×) |
 | `stop_on_prompt` | `true` | submitting a new prompt cuts what this session is saying, and counts it as spoken |
 | `stop_on_mic` | `true` | the microphone going live cuts what is being said, so dictation does not transcribe the voice |
+| `ack` | `true` | say a short line when a prompt is submitted, before the turn's own answer |
+| `ack_phrases` | – | your own lines to draw from; empty means the built-in set for `language_code` |
+| `ack_ttl_seconds` | `20` | an acknowledgement older than this is dropped unspoken |
 | `prefetch` | `true` | synthesize at Stop time so playback is instant when you come back |
 | `focus_strategy` | `auto` | `tty` (exact tab, needs AppleScript) / `app` (terminal app in front) |
 | `poll_interval` | `0.6` | seconds between focus checks |
