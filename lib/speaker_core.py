@@ -50,7 +50,11 @@ DEFAULT_CONFIG = {
     "strip_paths": True,
     # what gets spoken out of a long answer: full | smart (summary + decisions) | manual
     "summary_mode": "smart",
+    # size of one spoken fragment, not a guillotine: a longer answer is said in
+    # several fragments, in order, so nothing is silently dropped
     "summary_chars": 420,
+    # hard ceiling on a whole spoken answer, so a runaway page is not synthesized
+    "max_total_chars": 3000,
     # sessions with no explicit on/off of their own: on | off
     "pin_ttl_days": 30,
     "session_default": "on",
@@ -70,6 +74,14 @@ DEFAULT_CONFIG = {
     "prefetch": True,
     # focus detection: auto | tty | app
     "focus_strategy": "auto",
+    # consecutive polls that must agree before playback is cut: a single
+    # negative reading is a passing notification, not the user walking away
+    "blur_grace_polls": 3,
+    "mic_grace_polls": 2,
+    # how long a summary waits after the microphone cut it short
+    "mute_backoff_seconds": 5.0,
+    # attempts before a queued item is given up on (progress is kept between them)
+    "max_attempts": 6,
     "poll_interval": 0.6,
     "idle_exit_seconds": 3600,
     "volume": 1.0,
@@ -485,10 +497,51 @@ def speech_digest(raw: str, cfg: dict | None = None) -> str:
 
 
 def spoken_limit(cfg: dict) -> int:
+    """Size of a single spoken fragment."""
     mode = str(cfg.get("summary_mode", "smart")).lower()
     if mode == "full":
         return int(cfg.get("max_chars", 700))
     return min(int(cfg.get("summary_chars", 420)), int(cfg.get("max_chars", 700)))
+
+
+def total_limit(cfg: dict) -> int:
+    """Ceiling on a whole spoken answer. Long answers are said in fragments,
+    so this only exists to stop a runaway page from being synthesized."""
+    return max(int(cfg.get("max_total_chars", 3000)), spoken_limit(cfg))
+
+
+_SENTENCE_END = re.compile(r"(?<=[.!?\u2026])\s+")
+
+
+def split_for_speech(text: str, limit: int) -> list[str]:
+    """Break spoken text into fragments of at most `limit` characters.
+
+    Saying a long answer in order beats cutting it off at `limit`: every
+    sentence is still spoken, and playback that gets interrupted can resume at
+    the fragment it stopped on instead of repeating the whole summary."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    if limit <= 0 or len(text) <= limit:
+        return [text]
+    pieces: list[str] = []
+    for sentence in _SENTENCE_END.split(text):
+        sentence = sentence.strip()
+        while len(sentence) > limit:  # a single sentence longer than a fragment
+            head = sentence[:limit]
+            cut = max(head.rfind(", "), head.rfind("; "), head.rfind(" "))
+            cut = cut + 1 if cut > limit * 0.4 else limit
+            pieces.append(sentence[:cut].strip())
+            sentence = sentence[cut:].strip()
+        if sentence:
+            pieces.append(sentence)
+    fragments: list[str] = []
+    for piece in pieces:  # refill, so fragments sit close to `limit`
+        if fragments and len(fragments[-1]) + 1 + len(piece) <= limit:
+            fragments[-1] = f"{fragments[-1]} {piece}"
+        else:
+            fragments.append(piece)
+    return fragments
 
 
 def clean_text(raw: str, max_chars: int = 700, strip_paths: bool = True) -> str:
@@ -614,18 +667,20 @@ def prune_queue(ttl: float) -> None:
 # focus detection (macOS)
 # --------------------------------------------------------------------------- #
 
-def frontmost_bundle() -> str:
+def frontmost_bundle() -> str | None:
+    """Bundle id of the frontmost app. None means macOS would not answer —
+    callers must not read that as "some other app is in front"."""
     try:
         asn = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True,
                              timeout=5).stdout.strip()
         if not asn:
-            return ""
+            return None
         out = subprocess.run(["lsappinfo", "info", "-only", "bundleID", asn],
                              capture_output=True, text=True, timeout=5).stdout
         m = re.search(r'"CFBundleIdentifier"\s*=\s*"([^"]+)"', out)
-        return m.group(1) if m else ""
+        return m.group(1) if m else None
     except (OSError, subprocess.SubprocessError):
-        return ""
+        return None
 
 
 def _osascript(script: str) -> str:
@@ -648,16 +703,28 @@ def active_tty(bundle: str) -> str:
     return ""
 
 
+def focus_state_ex(cfg: dict) -> tuple[str, str, bool]:
+    """Returns (terminal_kind, active_tty, answered).
+
+    `answered` is False when macOS did not tell us which app is in front. A
+    query that failed is not a blur: treating it as one cuts playback for a
+    hiccup in lsappinfo rather than for anything the user did."""
+    bundle = frontmost_bundle()
+    if bundle is None:
+        return "", "", False
+    kind = TERMINAL_BUNDLES.get(bundle, "")
+    if not kind:
+        return "", "", True
+    if cfg.get("focus_strategy") == "app":
+        return kind, "", True
+    return kind, active_tty(bundle), True
+
+
 def focus_state(cfg: dict) -> tuple[str, str]:
     """Returns (terminal_kind, active_tty). terminal_kind is '' when the
     frontmost app is not a known terminal."""
-    bundle = frontmost_bundle()
-    kind = TERMINAL_BUNDLES.get(bundle, "")
-    if not kind:
-        return "", ""
-    if cfg.get("focus_strategy") == "app":
-        return kind, ""
-    return kind, active_tty(bundle)
+    kind, tty, _ = focus_state_ex(cfg)
+    return kind, tty
 
 
 def item_has_focus(item: dict, cfg: dict, kind: str, tty: str) -> bool:
@@ -831,15 +898,31 @@ def synthesize(text: str, cfg: dict | None = None) -> Path | None:
     if status != 200 or not body:
         log(f"tts failed ({status}): {err[:200]}")
         return None
-    tmp = out.with_suffix(".part")
-    tmp.write_bytes(body)
-    tmp.replace(out)
+    # A temp name of our own: the hook prefetches while the daemon may be
+    # synthesizing the same line, and a shared ".part" makes one of them fail.
+    tmp = out.with_name(f"{out.name}.{os.getpid()}.part")
+    try:
+        tmp.write_bytes(body)
+        tmp.replace(out)
+    except OSError as exc:
+        log(f"could not cache the audio: {exc}")
+        tmp.unlink(missing_ok=True)
+        return None
     prune_cache()
     return out
 
 
 def prune_cache(max_files: int = 400) -> None:
-    files = sorted(CACHE_DIR.glob("*.mp3"), key=lambda p: p.stat().st_mtime)
+    def age(path: Path) -> float:
+        try:  # another process may have pruned it between glob and stat
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    try:
+        files = sorted(CACHE_DIR.glob("*.mp3"), key=age)
+    except OSError:
+        return
     for path in files[:-max_files]:
         path.unlink(missing_ok=True)
 
@@ -896,12 +979,12 @@ def _fourcc(code: str) -> int:
     return struct.unpack(">I", code.encode("ascii"))[0]
 
 
-def _audio_u32(obj: int, selector: int) -> int | None:
+def _audio_u32(obj: int, selector: int, scope: str = "glob") -> int | None:
     """One UInt32 audio object property, or None if it cannot be read."""
     ca = _core_audio()
     if ca is None:
         return None
-    addr = _AudioAddress(selector, _fourcc("glob"), 0)  # scope global, element main
+    addr = _AudioAddress(selector, _fourcc(scope), 0)  # element main
     out = ctypes.c_uint32(0)
     size = ctypes.c_uint32(ctypes.sizeof(out))
     try:
@@ -923,7 +1006,14 @@ def microphone_live() -> bool | None:
     device = _audio_u32(1, _fourcc("dIn "))  # system object -> default input
     if not device:
         return None
-    running = _audio_u32(device, _fourcc("gone"))
+    # Ask about the input scope only. The global scope answers for the whole
+    # device, so on a headset — one device with both an input and an output —
+    # our own playback lights it up and every utterance cuts itself short.
+    running = _audio_u32(device, _fourcc("gone"), "inpt")
+    if running is None:
+        if device == _audio_u32(1, _fourcc("dOut")):
+            return None  # device refuses the input scope and we play through it
+        running = _audio_u32(device, _fourcc("gone"))
     return None if running is None else bool(running)
 
 
@@ -1005,7 +1095,10 @@ def _end_playback(proc) -> None:
 
 def speak_blocking(text: str, cfg: dict | None = None, should_continue=None,
                    session_id: str = "") -> str:
-    """Speak `text`; returns 'done', 'cancelled', 'aborted' or 'failed'.
+    """Speak `text`; returns 'done', 'cancelled', 'muted', 'aborted' or 'failed'.
+
+    'muted' is the microphone going live — the user started dictating, so what
+    is left is still wanted; 'cancelled' is a new prompt, which makes it stale.
 
     `should_continue` is polled while audio plays (used to stop on blur).
     `session_id` lets the session cut its own playback mid-sentence: the daemon
@@ -1028,6 +1121,8 @@ def speak_blocking(text: str, cfg: dict | None = None, should_continue=None,
     # recording — must not silence the plugin outright. Only a rising edge
     # during playback means someone has just started talking to Claude.
     mic_was_live = microphone_live() if watch_mic else None
+    mic_streak = 0
+    mic_grace = max(1, int(cfg.get("mic_grace_polls", 2)))
     try:
         while proc.poll() is None:
             if should_continue and not should_continue():
@@ -1037,10 +1132,16 @@ def speak_blocking(text: str, cfg: dict | None = None, should_continue=None,
                 live = microphone_live()
                 if live is not None:
                     if live and mic_was_live is False:
-                        log("playback cut: the microphone went live")
-                        _end_playback(proc)
-                        return "cancelled"
-                    mic_was_live = live
+                        # One reading is a click or a wake word; hold the rising
+                        # edge until the capture proves it is still going.
+                        mic_streak += 1
+                        if mic_streak >= mic_grace:
+                            log("playback cut: the microphone went live")
+                            _end_playback(proc)
+                            return "muted"
+                    else:
+                        mic_streak = 0
+                        mic_was_live = live
             now = time.time()
             if session_id and now - last_poll >= 0.25:
                 last_poll = now
@@ -1052,6 +1153,27 @@ def speak_blocking(text: str, cfg: dict | None = None, should_continue=None,
     finally:
         NOW_PLAYING.unlink(missing_ok=True)
     return "done" if proc.returncode == 0 else "failed"
+
+
+def speak_sequence(fragments: list[str], cfg: dict | None = None, should_continue=None,
+                   session_id: str = "", start: int = 0) -> tuple[str, int]:
+    """Speak `fragments` in order from `start`.
+
+    Returns (result, next_index), so a caller whose playback was cut short can
+    pick up at the fragment that did not make it instead of starting the whole
+    answer over — the difference between hearing a summary twice and hearing
+    all of it once."""
+    cfg = cfg or load_config()
+    index = max(0, int(start))
+    if index >= len(fragments):
+        return "done", len(fragments)
+    while index < len(fragments):
+        result = speak_blocking(fragments[index], cfg, should_continue,
+                                session_id=session_id)
+        if result != "done":
+            return result, index
+        index += 1
+    return "done", index
 
 
 def stop_playback() -> int:

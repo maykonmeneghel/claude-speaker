@@ -8,5 +8,6 @@ allowed-tools: Bash(bash:*)
 ```
 
 `smart` (default) speaks the summary section of the answer plus whatever decision it
-asks for; `full` speaks the whole answer up to `max_chars`; `manual` speaks only what
-Claude leaves with `speak note`. Confirm the mode in one line.
+asks for; `full` speaks the whole answer; `manual` speaks only what Claude leaves with
+`speak note`. Either way it is spoken in full, in fragments of `summary_chars`, up to
+`max_total_chars`. Confirm the mode in one line.

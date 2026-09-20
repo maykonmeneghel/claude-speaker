@@ -5,6 +5,58 @@ the single source of truth: bump it in a pull request, and merging that pull
 request tags `speaker--v<version>` and publishes the release. The section a
 release uses for its notes is the one whose heading matches its version.
 
+## 0.9.0
+
+- **A long summary is spoken in full instead of being cut off.** The Stop hook
+  trimmed the answer to `summary_chars` (420) and, because the trim backed up to
+  the last sentence boundary, it often kept far less than that: measured over a
+  day of real turns, one summary in five lost text, the worst of them 574 of its
+  859 characters. It ended on a complete sentence, so it did not sound truncated
+  — it sounded like the voice had stopped halfway through, which is exactly what
+  it was.
+
+  Long answers are now split at sentence boundaries into fragments of
+  `summary_chars` and spoken in order. The limit sizes a fragment; it no longer
+  decides how much of the answer is heard. `max_total_chars` (3000) is the new
+  ceiling on a whole spoken answer, so nothing runs away. The prefetch warms the
+  cache fragment by fragment, in speaking order, so playback still starts at
+  once.
+
+- **Interrupted playback resumes where it stopped.** A queued item remembers the
+  fragment it reached, so leaving the tab and coming back no longer restarts the
+  whole summary — the log used to show the same 153 characters spoken three
+  times over.
+
+- **Losing focus for an instant no longer cuts the voice.** A single poll
+  deciding the tab was not in front was enough to stop playback, which meant a
+  notification banner stealing focus, or `lsappinfo` hiccuping, truncated the
+  answer. `blur_grace_polls` (3) consecutive polls must now agree, and a focus
+  query macOS refused to answer counts for neither side: a failed query is not
+  the user walking away.
+
+- **The microphone check reads the input scope.** It asked for
+  `kAudioDevicePropertyDeviceIsRunningSomewhere` on the global scope of the
+  default input device. On a headset — one device with both an input and an
+  output — our own playback turns that true, so every utterance cut itself short
+  a second in. It now asks about the input scope, needs `mic_grace_polls` (2)
+  consecutive readings, and what it interrupts is kept: the rest waits
+  `mute_backoff_seconds` and resumes, rather than being counted as spoken and
+  dropped. A new prompt still discards the summary, which by then answers the
+  wrong question.
+
+- **An item is never given up on in silence.** Exhausting the retries dropped
+  the summary without a line in the log, which is the one case where the log is
+  worth having. Every drop is now logged with the result and the fragment it
+  reached, and `max_attempts` (6) replaces the hard-coded 3 — attempts no longer
+  cost the whole summary, since progress survives them.
+
+- **The daemon survives a bad cycle.** An exception anywhere in the loop — a
+  cache file pruned from under it, a CoreAudio hiccup — ended the process and
+  took every pending summary with it. The loop now logs the error and carries
+  on. The synthesis temp file also carries the writer's pid, so the hook's
+  prefetch and the daemon can no longer collide on a shared `.part` and fail
+  each other's write.
+
 ## 0.8.0
 
 - **A prompt is now acknowledged out loud as it is submitted.** A turn that

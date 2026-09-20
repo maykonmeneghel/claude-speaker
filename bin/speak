@@ -61,7 +61,8 @@ def cmd_status(_args: list[str]) -> int:
           f"{'ON' if core.enabled(current) else 'OFF'}"
           f" ({core.session_state(current) or 'session_default=' + str(cfg.get('session_default', 'on'))})")
     print(f"  spoken text   : {cfg.get('summary_mode', 'smart')} "
-          f"(max {core.spoken_limit(cfg)} chars)")
+          f"(up to {core.total_limit(cfg)} chars, said in "
+          f"{core.spoken_limit(cfg)}-char fragments)")
     print(f"  engine        : {engine}" + ("" if engine == "say" else f" ({cfg.get('model_id')})"))
     print(f"  elevenlabs key: {'found' if key else 'not configured'}"
           + (f" (…{key[-4:]})" if key else ""))
@@ -235,10 +236,13 @@ def cmd_test(args: list[str]) -> int:
     text = " ".join(args) or "Claude Speaker está funcionando. Esta é a voz que vai ler as respostas."
     engine = core.engine_in_use(cfg)
     print(f"engine: {engine}")
-    audio = core.synthesize(text, cfg) if engine == "elevenlabs" else None
+    fragments = core.split_for_speech(text, core.spoken_limit(cfg))
+    audio = core.synthesize(fragments[0], cfg) if engine == "elevenlabs" and fragments else None
     if engine == "elevenlabs" and audio is None:
         print("ElevenLabs failed (see log), falling back to macOS say")
-    result = core.speak_blocking(text, cfg)
+    if len(fragments) > 1:
+        print(f"saying it in {len(fragments)} fragments")
+    result, _ = core.speak_sequence(fragments, cfg)
     print(f"result: {result}")
     return 0 if result == "done" else 1
 
@@ -246,7 +250,7 @@ def cmd_test(args: list[str]) -> int:
 def cmd_queue(args: list[str]) -> int:
     if not args:
         return cmd_status([])
-    text = core.clean_text(" ".join(args), int(core.load_config().get("max_chars", 700)))
+    text = core.clean_text(" ".join(args), core.total_limit(core.load_config()))
     path = core.enqueue(text, os.environ.get("CLAUDE_SESSION_ID", "manual"), "manual")
     core.ensure_daemon(str(ROOT))
     print(f"queued for tty {core.tty_of_process_chain() or '?'}: {path}")
