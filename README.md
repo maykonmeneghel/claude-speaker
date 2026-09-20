@@ -55,6 +55,81 @@ shows an automation prompt. Approve it (System Settings → Privacy & Security �
 Automation) — without it, focus detection falls back to "the terminal app is in
 front", which speaks in the wrong tab when several sessions run side by side.
 
+## ElevenLabs: key, voice and plan
+
+Everything the plugin sends to ElevenLabs goes through three endpoints:
+`GET /v1/voices` (the list), `GET /v1/user/subscription` (the plan) and
+`POST /v1/text-to-speech/{voice_id}` (the audio).
+
+### The key
+
+Create it at **elevenlabs.io → Settings → API Keys**. The key travels in the
+`xi-api-key` header, and ElevenLabs lets you restrict it when you create it:
+limit the scope to text-to-speech and voice reading, set a credit quota, and add
+an IP allowlist if the machine has a fixed address. A key scoped that way cannot
+be used to change the account if it ever leaks.
+
+Store it with `/speaker:setup <key>`. It goes into the **login keychain**, under
+the service `claude-speaker-elevenlabs`, and is handed to `security` over stdin —
+never as a command argument, which any process on the machine could read with
+`ps`. It is never written to a file in the repository or in the plugin directory.
+
+The key is looked up in this order:
+
+1. `ELEVENLABS_API_KEY` or `ELEVEN_API_KEY` in the environment
+2. the login keychain (where `/speaker:setup` puts it)
+3. `api_key` in `~/.claude-speaker/config.json` — only if you put it there by
+   hand; `speak set` refuses that key, precisely so it does not end up on disk
+
+To rotate, run `/speaker:setup` with the new key (it overwrites). To remove it:
+`security delete-generic-password -s claude-speaker-elevenlabs`. With no key at
+all the plugin still works — it speaks with the macOS voice (`say -v Luciana`).
+
+### Picking the voice
+
+```
+/speaker:voices          # what the account can see, with the current one marked *
+/speaker:voice <id|name> # store it
+/speaker:test            # hear it
+```
+
+The choice lands in `~/.claude-speaker/config.json` as `voice_id` (what the API
+actually uses) and `voice_name` (only so the listings read well). A voice id is
+the 20-character string in the first column, the same one in the voice's URL on
+elevenlabs.io. If you know the id already, `speak voice <id>` accepts it without
+a key configured and validates it on the next call.
+
+### What a free account can and cannot use
+
+This is the trap worth knowing before you pick a voice by ear:
+
+| Voice | `category` | Free plan |
+| --- | --- | --- |
+| the ones bundled with every account | `premade` | works |
+| anything added from the **Voice Library** | `professional`, `cloned`, `generated` | **listed, but refused** |
+
+`GET /v1/voices` returns library voices to a free account, so they show up in
+`/speaker:voices` and can be selected — but the synthesis call answers
+`402 paid_plan_required`: *"Free users cannot use library voices via the API"*.
+The plugin then falls back to the macOS voice, which looks like "ElevenLabs
+stopped working". `/speaker:voices` marks those with `[needs a paid plan]`, and
+`/speaker:voice` warns when you pick one; `speak log` shows the 402.
+
+Voice cloning (instant and professional) is a paid feature too, so a cloned voice
+of your own is not an option on the free plan. A free account also gets 10,000
+characters a month. The plugin is built to spend little of it: what is spoken is
+a summary capped at `summary_chars` (420 by default, `max_chars` 700 in `full`
+mode), identical text is served from the local mp3 cache instead of being billed
+twice, and nothing is synthesized while the session is silenced.
+
+### Model and audio
+
+`model_id` defaults to `eleven_turbo_v2_5`; `eleven_flash_v2_5` is cheaper and
+faster with slightly flatter prosody. `language_code` (`pt` by default) is only
+accepted by the turbo and flash models, and the plugin drops it for any other
+model rather than having the call rejected. `output_format` defaults to
+`mp3_44100_128`, played by `afplay`.
+
 ## Commands
 
 | Command | What it does |
@@ -65,7 +140,8 @@ front", which speaks in the wrong tab when several sessions run side by side.
 | `/speaker:summary [smart\|full\|manual]` | how much of each answer is spoken |
 | `/speaker:stop` | stop the audio playing right now |
 | `/speaker:test [text]` | speak immediately, ignoring focus |
-| `/speaker:voices` | list the voices on the account |
+| `/speaker:voices` | list the voices on the account, marking what the plan allows |
+| `/speaker:voice <id\|name>` | pick the voice |
 | `/speaker:setup` | store the API key and pick a voice |
 | `/speaker:doctor` | diagnose key, tty, focus, daemon, hooks |
 | `/speaker:shortcuts [install\|uninstall]` | the same commands as `/speaker-*`, without the prefix |
@@ -146,13 +222,36 @@ to the file name, headings/bullets/tables/emoji are stripped, and the result is
 truncated at a sentence boundary within `max_chars`. Identical text is cached on
 disk, so repeats and retries cost nothing.
 
-## State
+## State, and what leaves the machine
 
-Everything mutable lives in `~/.claude-speaker/`: `config.json`, `queue/`,
-`cache/` (mp3), `sessions/` (session → tty map, plus its `speak` pin), `notes/`
-(one-turn notes), `speaker.log`, `speakerd.pid`.
-Uninstalling the plugin leaves that directory untouched; delete it by hand to
-reset.
+Nothing mutable is written inside the plugin or the repository. Everything lives
+in `~/.claude-speaker/`, created `0700` with every file `0600`, because the queue
+and the notes hold what Claude just said:
+
+```
+~/.claude-speaker/
+  config.json     every key from the Configuration table   (0600)
+  queue/          one json per pending utterance: the text, the session, its tty
+  cache/          synthesized mp3, keyed by text+voice+model; newest 400 kept
+  sessions/       session -> tty map and the per-session on/off pin
+  notes/          a line left by `speak note`, consumed by the next turn
+  speaker.log     timestamps, session ids, character counts — never the text
+  speakerd.pid    the running daemon
+```
+
+The API key is not in there: it is in the login keychain (see *ElevenLabs*).
+Upgrading from a version before 0.3.0 tightens the modes of files already on
+disk, once, on the first run.
+
+**What is sent to ElevenLabs**: the text to be spoken — that is, a trimmed
+summary of Claude's answer — plus the voice id and model. Code blocks, tables and
+URLs are stripped before that (see *How the text is prepared*). Nothing else
+leaves the machine: no prompt, no file content, no session id. With no key
+configured, nothing leaves the machine at all, since `say` is local.
+
+Uninstalling the plugin leaves `~/.claude-speaker/` untouched; delete it by hand
+to reset, and remove the key with
+`security delete-generic-password -s claude-speaker-elevenlabs`.
 
 ## Known limits
 
@@ -162,3 +261,7 @@ reset.
   app-level focus (`focus_strategy=app`).
 - `tmux`/`screen` panes report the tty of the outer terminal, so a session inside
   a multiplexer is matched at window level, not pane level.
+- A session's `on`/`off` pin lives in its session file, and the `SessionEnd` hook
+  deletes that file. A session that ends and is then resumed comes back on
+  `session_default`, so a `/speaker:on` from before the resume is forgotten. Set
+  `speak default on` if you would rather not run it again.

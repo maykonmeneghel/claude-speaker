@@ -289,10 +289,21 @@ def cmd_voices(_args: list[str]) -> int:
         print("no voices (no key configured, or the API call failed — see speak doctor)")
         return 1
     cfg = core.load_config()
+    sub = core.subscription()
+    tier = sub.get("tier") or "?"
+    blocked = 0
     for v in voices:
         cur = " *" if v.get("voice_id") == cfg.get("voice_id") else ""
         labels = ", ".join(f"{k}={val}" for k, val in (v.get("labels") or {}).items())
-        print(f"{v.get('voice_id')}  {v.get('name'):<22} {labels}{cur}")
+        mark = ""
+        if not core.voice_usable(v, sub):
+            mark = "  [needs a paid plan]"
+            blocked += 1
+        print(f"{v.get('voice_id')}  {v.get('name'):<22} {labels}{cur}{mark}")
+    if blocked:
+        print(f"\nplan: {tier}. {blocked} voice(s) above come from the voice library: "
+              "they are listed, but the TTS call answers 402 and the plugin falls back "
+              "to the macOS voice. Pick one without the mark, or upgrade the account.")
     return 0
 
 
@@ -309,6 +320,10 @@ def cmd_voice(args: list[str]) -> int:
             cfg["voice_name"] = v.get("name", "")
             core.save_config(cfg)
             print(f"voice set: {cfg['voice_name']} ({cfg['voice_id']})")
+            if not core.voice_usable(v):
+                print("warning: this is a voice library voice and the account is on the "
+                      "free plan — ElevenLabs answers 402 for it, so you will hear the "
+                      "macOS voice instead. `speak voices` marks the ones that work.")
             return 0
     if not voices and re.fullmatch(r"[A-Za-z0-9]{16,}", wanted):
         # no key yet (or the API is unreachable): accept a raw voice id as given

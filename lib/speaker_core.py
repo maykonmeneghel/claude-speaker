@@ -82,8 +82,44 @@ TERMINAL_BUNDLES = {
 # --------------------------------------------------------------------------- #
 
 def ensure_dirs() -> None:
+    # 0700/0600 throughout: queue items and notes hold what Claude just said,
+    # which is nobody else's business on a shared machine
     for d in (STATE_DIR, QUEUE_DIR, CACHE_DIR, SESSIONS_DIR, NOTES_DIR):
-        d.mkdir(parents=True, exist_ok=True)
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            d.chmod(0o700)
+        except OSError:
+            pass
+    _harden_existing()
+
+
+def _private(path: Path) -> Path:
+    """chmod 0600, ignoring a filesystem that will not do it."""
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return path
+
+
+def _harden_existing() -> None:
+    """One-off pass over state written before 0600 was the rule.
+
+    Files already on disk keep their old mode until something rewrites them,
+    and a session file or a queue item can sit there for a long time. The
+    marker keeps this to a single pass instead of a walk on every call.
+    """
+    marker = STATE_DIR / ".perms-v1"
+    if marker.exists():
+        return
+    for path in STATE_DIR.rglob("*"):
+        if path.is_file():
+            _private(path)
+    try:
+        marker.touch()
+        marker.chmod(0o600)
+    except OSError:
+        pass
 
 
 def log(msg: str) -> None:
@@ -92,6 +128,7 @@ def log(msg: str) -> None:
     try:
         with LOG_FILE.open("a", encoding="utf-8") as fh:
             fh.write(f"[{stamp}] {msg}\n")
+        _private(LOG_FILE)
         if LOG_FILE.stat().st_size > 2_000_000:
             tail = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()[-2000:]
             LOG_FILE.write_text("\n".join(tail) + "\n", encoding="utf-8")
@@ -193,33 +230,51 @@ def resolve_session_id(explicit: str | None = None) -> str:
     return ""
 
 
-def api_key() -> str:
-    key = os.environ.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVEN_API_KEY") or ""
-    if key.strip():
-        return key.strip()
+def keychain_key() -> str:
+    """The key as stored in the login keychain, ignoring the environment."""
     try:
         out = subprocess.run(
             ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
             capture_output=True, text=True, timeout=10,
         )
-        if out.returncode == 0 and out.stdout.strip():
+        if out.returncode == 0:
             return out.stdout.strip()
     except (OSError, subprocess.SubprocessError):
         pass
+    return ""
+
+
+def api_key() -> str:
+    key = os.environ.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVEN_API_KEY") or ""
+    if key.strip():
+        return key.strip()
+    key = keychain_key()
+    if key:
+        return key
+    # last resort, for a key written into the config by hand
     return str(load_config().get("api_key", "") or "").strip()
 
 
 def store_api_key(key: str) -> bool:
-    """Store the key in the login keychain (never in the plugin directory)."""
+    """Store the key in the login keychain (never in the plugin directory).
+
+    The key goes in over stdin, not as `-w <key>`: an argument is visible to
+    every process on the machine through `ps` for as long as the command runs.
+    With `-w` and no value, `security` prompts for the password twice, so the
+    key is fed twice. Success is confirmed by reading the key back.
+    """
+    key = (key or "").strip()
+    if not key:
+        return False
     try:
         subprocess.run(
             ["security", "add-generic-password", "-U", "-s", KEYCHAIN_SERVICE,
-             "-a", os.environ.get("USER", "claude"), "-w", key],
-            capture_output=True, text=True, timeout=15, check=True,
+             "-a", os.environ.get("USER", "claude"), "-w"],
+            input=f"{key}\n{key}\n", capture_output=True, text=True, timeout=15,
         )
-        return True
     except (OSError, subprocess.SubprocessError):
         return False
+    return keychain_key() == key
 
 
 # --------------------------------------------------------------------------- #
@@ -278,6 +333,7 @@ def register_session(session_id: str, extra: dict | None = None) -> dict:
     if extra:
         data.update(extra)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _private(path)
     return data
 
 
@@ -318,7 +374,7 @@ def put_note(session_id: str, text: str) -> Path:
     ensure_dirs()
     path = note_file(session_id)
     path.write_text((text or "").strip() + "\n", encoding="utf-8")
-    return path
+    return _private(path)
 
 
 def take_note(session_id: str) -> str:
@@ -464,6 +520,7 @@ def enqueue(text: str, session_id: str, kind: str = "stop", extra: dict | None =
     path = QUEUE_DIR / f"{item['id']}-{os.getpid()}.json"
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(item, ensure_ascii=False), encoding="utf-8")
+    _private(tmp)
     tmp.replace(path)
     return path
 
@@ -643,6 +700,30 @@ def list_voices() -> list[dict]:
         return json.loads(body).get("voices", [])
     except ValueError:
         return []
+
+
+def subscription() -> dict:
+    """The account's plan, or {} when there is no key or the call fails."""
+    status, body, _ = _eleven_request("/user/subscription")
+    if status != 200:
+        return {}
+    try:
+        return json.loads(body)
+    except ValueError:
+        return {}
+
+
+def voice_usable(voice: dict, sub: dict | None = None) -> bool:
+    """Whether the account can actually synthesize with this voice.
+
+    A free account lists library voices in /voices but the TTS call answers
+    402 paid_plan_required, and the plugin quietly falls back to `say`. The
+    voices bundled with every account (category "premade") always work.
+    """
+    if (voice.get("category") or "") == "premade":
+        return True
+    sub = subscription() if sub is None else sub
+    return (sub.get("tier") or "free") != "free"
 
 
 def resolve_voice(cfg: dict) -> str:
