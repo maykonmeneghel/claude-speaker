@@ -160,7 +160,7 @@ def main() -> int:
                 if result in ("done", "cancelled"):
                     core.drop_queue_item(item)
                     if result == "cancelled":
-                        core.log("playback cut by a new prompt, item counted as spoken")
+                        core.log("cut playback counted as spoken, item dropped")
                 elif result == "aborted" and attempts < 3:
                     # A retry must never resurrect an item something else dropped
                     # in the meantime — writing the file back would recreate it.

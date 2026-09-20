@@ -5,6 +5,28 @@ the single source of truth: bump it in a pull request, and merging that pull
 request tags `speaker--v<version>` and publishes the release. The section a
 release uses for its notes is the one whose heading matches its version.
 
+## 0.7.0
+
+- **The voice stops when the microphone goes live.** Dictating a prompt while
+  Claude was still speaking made the microphone transcribe the voice, so the
+  prompt arrived with a sentence of Claude's own answer glued to the front.
+  Stopping on `UserPromptSubmit` (0.6.0) cannot help: it fires when the prompt
+  is submitted, and by then the audio is already in the transcript. Claude Code
+  has no hook on a keystroke, so the keyboard cannot be watched at all.
+
+  The microphone can. CoreAudio publishes
+  `kAudioDevicePropertyDeviceIsRunningSomewhere` for the default input device,
+  true whenever any process is capturing; reading it is a property query, not a
+  recording, so it needs no permission and shows nothing in the menu bar. It
+  costs 0.25 ms per poll. This works with any dictation tool, because it watches
+  the device rather than the app.
+
+  Only a rising edge during an utterance cuts: a microphone already capturing
+  when playback began — a call, a recording — is left alone rather than
+  silencing the plugin for its duration. Where CoreAudio does not answer,
+  nothing is cut, and `speak doctor` now reports whether the machine can tell.
+  Set `stop_on_mic` to `false` to turn it off.
+
 ## 0.6.0
 
 - **Submitting a prompt stops the voice.** Until now a summary kept playing

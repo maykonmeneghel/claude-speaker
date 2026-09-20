@@ -443,6 +443,10 @@ def cmd_doctor(_args: list[str]) -> int:
         check("tab tty via AppleScript", bool(active),
               "" if active else "approve the automation prompt for the terminal app "
                                "(System Settings > Privacy & Security > Automation)")
+    mic = core.microphone_live()
+    check("microphone state readable", mic is not None,
+          ("in use right now" if mic else "idle") if mic is not None
+          else "CoreAudio did not answer — stop_on_mic cannot work here")
     check("daemon", bool(core.daemon_pid()), "run: speak daemon start")
     hooks = ROOT / "hooks" / "hooks.json"
     check("plugin hooks present", hooks.exists(), str(hooks))
