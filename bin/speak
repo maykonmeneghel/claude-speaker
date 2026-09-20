@@ -1,0 +1,457 @@
+#!/usr/bin/env python3
+"""claude-speaker CLI — used by the slash commands and usable on its own.
+
+  speak status              what is configured, running and pending
+  speak on | off            speak / stay quiet in THIS session only
+  speak on|off --global     master switch for every session at once
+  speak auto                drop this session's choice, follow session_default
+  speak default on|off      what a brand-new session does
+  speak sessions            every known session and whether it speaks
+  speak note "texto"        speak exactly this at the end of the current turn
+  speak stop                stop whatever is playing right now
+  speak test [text]         speak immediately, bypassing the focus check
+  speak queue [text]        queue text as if Claude had just stopped
+  speak clear               empty the queue
+  speak setup [api-key]     store the ElevenLabs key in the login keychain
+  speak voices              list the voices available on the account
+  speak voice <id|name>     pick the voice
+  speak config              show the effective config
+  speak set <key> <value>   change one config key
+  speak daemon <start|stop|restart|status>
+  speak doctor              end-to-end diagnosis of the pipeline
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import speaker_core as core  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _fmt_age(ts: float) -> str:
+    delta = max(0, int(time.time() - ts))
+    return f"{delta}s" if delta < 60 else f"{delta // 60}m{delta % 60:02d}s"
+
+
+def cmd_status(_args: list[str]) -> int:
+    cfg = core.load_config()
+    engine = core.engine_in_use(cfg)
+    key = core.api_key()
+    pid = core.daemon_pid()
+    kind, tty = core.focus_state(cfg)
+    items = core.list_queue()
+    sessions = sorted(core.SESSIONS_DIR.glob("*.json"))
+
+    current = core.resolve_session_id()
+    print("claude-speaker")
+    print(f"  master switch : {'ON' if core.global_enabled() else 'OFF'}")
+    print(f"  this session  : {current[:8] or '?'} speaking "
+          f"{'ON' if core.enabled(current) else 'OFF'}"
+          f" ({core.session_state(current) or 'session_default=' + str(cfg.get('session_default', 'on'))})")
+    print(f"  spoken text   : {cfg.get('summary_mode', 'smart')} "
+          f"(max {core.spoken_limit(cfg)} chars)")
+    print(f"  engine        : {engine}" + ("" if engine == "say" else f" ({cfg.get('model_id')})"))
+    print(f"  elevenlabs key: {'found' if key else 'not configured'}"
+          + (f" (…{key[-4:]})" if key else ""))
+    print(f"  voice         : {cfg.get('voice_name') or '-'} {cfg.get('voice_id') or ''}".rstrip()
+          if engine == "elevenlabs" else f"  voice         : say -v {cfg.get('say_voice')}")
+    print(f"  daemon        : {'running pid ' + str(pid) if pid else 'stopped'}")
+    print(f"  front terminal: {kind or 'not a terminal'}"
+          + (f" tab tty {tty}" if tty else ""))
+    print(f"  queue         : {len(items)} item(s)")
+    for it in items:
+        mark = "<- in focus" if core.item_has_focus(it, cfg, kind, tty) else ""
+        print(f"     [{it.get('kind')}] {it.get('tty')} {_fmt_age(it.get('created_at', 0))} ago "
+              f"{len(it.get('text', ''))} chars {mark}")
+    print(f"  sessions known: {len(sessions)}")
+    for sp in sessions:
+        try:
+            d = json.loads(sp.read_text())
+        except (OSError, ValueError):
+            continue
+        sid = d.get('session_id', '?')
+        print(f"     {sid[:8]} tty={d.get('tty') or '?'} "
+              f"term={d.get('term_program') or '?'} "
+              f"speak={core.session_state(sid) or 'default'}")
+    print(f"  state dir     : {core.STATE_DIR}")
+    return 0
+
+
+def _scope_args(args: list[str]) -> tuple[bool, str, list[str]]:
+    """--global targets the master switch, --session ID targets another session."""
+    is_global = False
+    session = ""
+    rest = []
+    it = iter(range(len(args)))
+    skip = -1
+    for i, a in enumerate(args):
+        if i == skip:
+            continue
+        if a in ("--global", "-g", "--all"):
+            is_global = True
+        elif a in ("--session", "-s") and i + 1 < len(args):
+            session = args[i + 1]
+            skip = i + 1
+        elif a.startswith("--session="):
+            session = a.split("=", 1)[1]
+        else:
+            rest.append(a)
+    return is_global, session, rest
+
+
+def _target_session(session: str) -> str:
+    sid = core.resolve_session_id(session or None)
+    if not sid:
+        print("could not tell which Claude session this is "
+              "(no tty match). Pass --session <id>, or use --global.")
+    return sid
+
+
+def cmd_on(args: list[str]) -> int:
+    is_global, session, _ = _scope_args(args)
+    if is_global:
+        core.set_enabled(True)
+        core.ensure_daemon(str(ROOT))
+        print("claude-speaker: master switch ON "
+              f"(sessions with no choice of their own follow session_default="
+              f"{core.load_config().get('session_default', 'on')})")
+        return 0
+    sid = _target_session(session)
+    if not sid:
+        return 1
+    core.set_session_enabled(sid, True)
+    if not core.global_enabled():
+        print(f"session {sid[:8]}: ON — but the master switch is OFF, "
+              "run: speak on --global")
+        return 0
+    core.ensure_daemon(str(ROOT))
+    print(f"claude-speaker: ON for session {sid[:8]} only")
+    return 0
+
+
+def cmd_off(args: list[str]) -> int:
+    is_global, session, _ = _scope_args(args)
+    if is_global:
+        core.set_enabled(False)
+        core.stop_playback()
+        print("claude-speaker: master switch OFF (nothing speaks anywhere)")
+        return 0
+    sid = _target_session(session)
+    if not sid:
+        return 1
+    core.set_session_enabled(sid, False)
+    for item in core.list_queue():
+        if item.get("session_id") == sid:
+            core.drop_queue_item(item)
+    core.stop_playback()
+    print(f"claude-speaker: OFF for session {sid[:8]} — other sessions keep speaking")
+    return 0
+
+
+def cmd_auto(args: list[str]) -> int:
+    """Drop this session's own choice and follow session_default again."""
+    _, session, _ = _scope_args(args)
+    sid = _target_session(session)
+    if not sid:
+        return 1
+    core.set_session_enabled(sid, None)
+    default = core.load_config().get("session_default", "on")
+    print(f"session {sid[:8]}: follows session_default ({default})")
+    return 0
+
+
+def cmd_default(args: list[str]) -> int:
+    """What a brand-new session does before anyone touches it."""
+    cfg = core.load_config()
+    if not args:
+        print(f"session_default = {cfg.get('session_default', 'on')}")
+        return 0
+    value = args[0].strip().lower()
+    if value not in ("on", "off"):
+        print("usage: speak default <on|off>")
+        return 1
+    cfg["session_default"] = value
+    core.save_config(cfg)
+    print(f"session_default = {value}"
+          + ("  (new sessions stay silent until you run: speak on)" if value == "off"
+             else "  (new sessions speak unless you run: speak off)"))
+    return 0
+
+
+def cmd_note(args: list[str]) -> int:
+    """Leave the exact sentence to be spoken for the current turn."""
+    is_global, session, rest = _scope_args(args)
+    text = " ".join(rest).strip()
+    if not text:
+        print('usage: speak note "o que deve ser falado neste turno"')
+        return 1
+    sid = _target_session(session)
+    if not sid:
+        return 1
+    core.put_note(sid, text)
+    print(f"note stored for session {sid[:8]} ({len(text)} chars); "
+          "the Stop hook speaks it instead of the answer")
+    return 0
+
+
+def cmd_sessions(_args: list[str]) -> int:
+    cfg = core.load_config()
+    current = core.resolve_session_id()
+    print(f"master switch : {'ON' if core.global_enabled() else 'OFF'}")
+    print(f"session_default: {cfg.get('session_default', 'on')}")
+    for sess in core.known_sessions():
+        sid = sess.get("session_id", "?")
+        state = core.session_state(sid) or f"default ({cfg.get('session_default','on')})"
+        here = " <- this tab" if sid == current else ""
+        print(f"  {sid[:8]}  speak={state:<22} tty={sess.get('tty') or '?'} "
+              f"cwd={sess.get('cwd') or '?'}{here}")
+    return 0
+
+
+def cmd_stop(_args: list[str]) -> int:
+    core.stop_playback()
+    print("playback stopped")
+    return 0
+
+
+def cmd_test(args: list[str]) -> int:
+    cfg = core.load_config()
+    text = " ".join(args) or "Claude Speaker está funcionando. Esta é a voz que vai ler as respostas."
+    engine = core.engine_in_use(cfg)
+    print(f"engine: {engine}")
+    audio = core.synthesize(text, cfg) if engine == "elevenlabs" else None
+    if engine == "elevenlabs" and audio is None:
+        print("ElevenLabs failed (see log), falling back to macOS say")
+    result = core.speak_blocking(text, cfg)
+    print(f"result: {result}")
+    return 0 if result == "done" else 1
+
+
+def cmd_queue(args: list[str]) -> int:
+    if not args:
+        return cmd_status([])
+    text = core.clean_text(" ".join(args), int(core.load_config().get("max_chars", 700)))
+    path = core.enqueue(text, os.environ.get("CLAUDE_SESSION_ID", "manual"), "manual")
+    core.ensure_daemon(str(ROOT))
+    print(f"queued for tty {core.tty_of_process_chain() or '?'}: {path}")
+    print("switch to another app and come back to this tab to hear it")
+    return 0
+
+
+def cmd_clear(_args: list[str]) -> int:
+    n = 0
+    for item in core.list_queue():
+        core.drop_queue_item(item)
+        n += 1
+    print(f"queue cleared ({n} item(s))")
+    return 0
+
+
+def cmd_setup(args: list[str]) -> int:
+    key = args[0] if args else os.environ.get("ELEVENLABS_API_KEY", "")
+    if not key:
+        print("usage: speak setup <elevenlabs-api-key>")
+        print("the key goes into the login keychain, never into the plugin directory")
+        return 1
+    if not core.store_api_key(key):
+        print("could not write to the keychain")
+        return 1
+    cfg = core.load_config()
+    cfg["engine"] = "elevenlabs"
+    core.save_config(cfg)
+    voices = core.list_voices()
+    if not voices:
+        print("key stored, but listing voices failed — check the key or the network")
+        return 1
+    print(f"key stored in the keychain. {len(voices)} voice(s) available:")
+    for v in voices[:15]:
+        labels = ", ".join(f"{k}={v}" for k, v in (v.get("labels") or {}).items())
+        print(f"  {v.get('voice_id')}  {v.get('name')}  {labels}")
+    print("\nnext: speak voice <id-or-name>")
+    return 0
+
+
+def cmd_voices(_args: list[str]) -> int:
+    voices = core.list_voices()
+    if not voices:
+        print("no voices (no key configured, or the API call failed — see speak doctor)")
+        return 1
+    cfg = core.load_config()
+    for v in voices:
+        cur = " *" if v.get("voice_id") == cfg.get("voice_id") else ""
+        labels = ", ".join(f"{k}={val}" for k, val in (v.get("labels") or {}).items())
+        print(f"{v.get('voice_id')}  {v.get('name'):<22} {labels}{cur}")
+    return 0
+
+
+def cmd_voice(args: list[str]) -> int:
+    if not args:
+        print("usage: speak voice <voice-id-or-name>")
+        return 1
+    wanted = " ".join(args).strip()
+    cfg = core.load_config()
+    voices = core.list_voices()
+    for v in voices:
+        if wanted.lower() in (v.get("voice_id", "").lower(), v.get("name", "").lower()):
+            cfg["voice_id"] = v.get("voice_id", "")
+            cfg["voice_name"] = v.get("name", "")
+            core.save_config(cfg)
+            print(f"voice set: {cfg['voice_name']} ({cfg['voice_id']})")
+            return 0
+    if not voices and re.fullmatch(r"[A-Za-z0-9]{16,}", wanted):
+        # no key yet (or the API is unreachable): accept a raw voice id as given
+        cfg["voice_id"] = wanted
+        cfg["voice_name"] = ""
+        core.save_config(cfg)
+        print(f"voice id stored unverified: {wanted}")
+        print("run speak setup <key> to validate it against the account")
+        return 0
+    print(f"voice not found: {wanted}")
+    return 1
+
+
+def cmd_config(_args: list[str]) -> int:
+    print(json.dumps(core.load_config(), indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_set(args: list[str]) -> int:
+    if len(args) < 2:
+        print("usage: speak set <key> <value>")
+        return 1
+    key, raw = args[0], " ".join(args[1:])
+    if key not in core.DEFAULT_CONFIG:
+        print(f"unknown key: {key}\nvalid keys: {', '.join(sorted(core.DEFAULT_CONFIG))}")
+        return 1
+    default = core.DEFAULT_CONFIG[key]
+    try:
+        if isinstance(default, bool):
+            value = raw.strip().lower() in ("1", "true", "yes", "on", "sim")
+        elif isinstance(default, int):
+            value = int(raw)
+        elif isinstance(default, float):
+            value = float(raw)
+        else:
+            value = raw
+    except ValueError:
+        print(f"invalid value for {key} (expected {type(default).__name__})")
+        return 1
+    cfg = core.load_config()
+    cfg[key] = value
+    core.save_config(cfg)
+    print(f"{key} = {json.dumps(value, ensure_ascii=False)}")
+    return 0
+
+
+def cmd_daemon(args: list[str]) -> int:
+    action = args[0] if args else "status"
+    pid = core.daemon_pid()
+    if action == "status":
+        print(f"daemon: {'running pid ' + str(pid) if pid else 'stopped'}")
+        return 0
+    if action in ("stop", "restart"):
+        if pid:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                print(f"sent SIGTERM to {pid}")
+            except OSError as exc:
+                print(f"could not stop {pid}: {exc}")
+            for _ in range(20):
+                if not core.daemon_pid():
+                    break
+                time.sleep(0.2)
+        else:
+            print("daemon was not running")
+        if action == "stop":
+            return 0
+    new_pid = core.ensure_daemon(str(ROOT))
+    print(f"daemon started pid {new_pid}" if new_pid else "failed to start daemon")
+    return 0 if new_pid else 1
+
+
+def cmd_log(args: list[str]) -> int:
+    n = args[0] if args else "40"
+    if core.LOG_FILE.exists():
+        subprocess.run(["tail", "-n", str(n), str(core.LOG_FILE)])
+    else:
+        print("no log yet")
+    return 0
+
+
+def cmd_doctor(_args: list[str]) -> int:
+    cfg = core.load_config()
+    ok = True
+
+    def check(label: str, good: bool, detail: str = "") -> None:
+        nonlocal ok
+        ok = ok and good
+        print(f"  [{'ok' if good else '!!'}] {label}" + (f" — {detail}" if detail else ""))
+
+    print("claude-speaker doctor")
+    check("macOS afplay", bool(__import__("shutil").which("afplay")))
+    check("master switch", core.global_enabled(),
+          "" if core.global_enabled() else "run: speak on --global")
+    sid = core.resolve_session_id()
+    check("this session identified", bool(sid), sid[:8] or "no tty match — pass --session <id>")
+    if sid:
+        check("this session speaks", core.enabled(sid),
+              core.session_state(sid) or f"session_default={cfg.get('session_default','on')}"
+              + ("" if core.enabled(sid) else " — run: speak on"))
+    key = core.api_key()
+    check("ElevenLabs key", bool(key),
+          "" if key else "falling back to macOS say — run: speak setup <key>")
+    if key:
+        voices = core.list_voices()
+        check("ElevenLabs API reachable", bool(voices), f"{len(voices)} voice(s)")
+        check("voice selected", bool(cfg.get("voice_id")), cfg.get("voice_name", ""))
+    tty = core.tty_of_process_chain()
+    check("tty of this shell", bool(tty), tty or "no controlling tty found")
+    kind, active = core.focus_state(cfg)
+    check("frontmost terminal detected", bool(kind), f"{kind or '-'} tab {active or '-'}")
+    if kind in ("terminal", "iterm2"):
+        check("tab tty via AppleScript", bool(active),
+              "" if active else "approve the automation prompt for the terminal app "
+                               "(System Settings > Privacy & Security > Automation)")
+    check("daemon", bool(core.daemon_pid()), "run: speak daemon start")
+    hooks = ROOT / "hooks" / "hooks.json"
+    check("plugin hooks present", hooks.exists(), str(hooks))
+    print("  queue:", len(core.list_queue()), "item(s); log:", core.LOG_FILE)
+    return 0 if ok else 1
+
+
+COMMANDS = {
+    "status": cmd_status, "on": cmd_on, "off": cmd_off, "stop": cmd_stop,
+    "auto": cmd_auto, "default": cmd_default, "note": cmd_note,
+    "sessions": cmd_sessions,
+    "test": cmd_test, "queue": cmd_queue, "clear": cmd_clear, "setup": cmd_setup,
+    "voices": cmd_voices, "voice": cmd_voice, "config": cmd_config, "set": cmd_set,
+    "daemon": cmd_daemon, "log": cmd_log, "doctor": cmd_doctor,
+}
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    cmd, args = argv[0], argv[1:]
+    fn = COMMANDS.get(cmd)
+    if not fn:
+        print(f"unknown command: {cmd}\n")
+        print(__doc__)
+        return 1
+    core.ensure_dirs()
+    return fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

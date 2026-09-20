@@ -1,0 +1,49 @@
+{
+  "description": "claude-speaker: queue Claude's output on Stop/Notification, keep the focus monitor daemon alive per session",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session.sh\" start",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session.sh\" end",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'PY=\"$(command -v python3 || echo /usr/bin/python3)\"; exec \"$PY\" \"$CLAUDE_PLUGIN_ROOT/hooks/enqueue.py\" stop'",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'PY=\"$(command -v python3 || echo /usr/bin/python3)\"; exec \"$PY\" \"$CLAUDE_PLUGIN_ROOT/hooks/enqueue.py\" notification'",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

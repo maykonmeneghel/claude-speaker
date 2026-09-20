@@ -1,0 +1,4 @@
+# runtime state lives in ~/.claude-speaker, never in the repo
+*.pyc
+__pycache__/
+.DS_Store
