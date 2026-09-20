@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
@@ -154,8 +155,11 @@ def main() -> int:
             if not raw.strip():
                 core.log(f"stop hook: session={short} no assistant text in the transcript")
                 return 0
+            # The whole digest, not one fragment of it: the daemon says a long
+            # answer in order, so cutting it here is what made summaries stop
+            # halfway through.
             text = core.clean_text(core.speech_digest(raw, cfg),
-                                   core.spoken_limit(cfg),
+                                   core.total_limit(cfg),
                                    cfg.get("strip_paths", True))
         kind = "stop"
 
@@ -168,8 +172,15 @@ def main() -> int:
     if item_path:
         core.log(f"queued {kind} session={short} chars={len(text)}")
         if cfg.get("prefetch", True) and core.engine_in_use(cfg) == "elevenlabs":
+            # Warm the cache while the user is away, fragment by fragment and
+            # in speaking order, so playback starts at once and the daemon only
+            # waits on the API for what this hook did not reach in time.
+            deadline = time.time() + 8
             try:
-                core.synthesize(text, cfg)  # warm the cache while the user is away
+                for fragment in core.split_for_speech(text, core.spoken_limit(cfg)):
+                    if time.time() > deadline:
+                        break
+                    core.synthesize(fragment, cfg)
             except Exception as exc:  # never break the hook over TTS
                 core.log(f"prefetch failed: {exc}")
         core.ensure_daemon()

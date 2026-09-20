@@ -55,12 +55,23 @@ is a property query and not a recording: it needs no microphone permission and
 puts nothing in the menu bar. The voice stops when you start talking, whatever
 you are dictating with — Claude Code, macOS dictation, or an app of your own.
 
-Only a rising edge during an utterance counts. A microphone that was already
-capturing when playback started — a call, a recording left running — is left
-alone, because silencing the plugin for the length of a meeting is not what
-anyone asked for. And where CoreAudio will not answer, nothing is cut at all;
-`speak doctor` says whether this machine can tell. Set `stop_on_mic` to `false`
-to turn it off.
+The property is read on the input scope rather than the whole device. On a
+headset, where one device carries both the input and the output, the global
+answer turns true for our own playback and every utterance would cut itself
+short a second in.
+
+Only a rising edge during an utterance counts, and it has to hold for
+`mic_grace_polls` readings, so a click is not mistaken for someone talking. A
+microphone that was already capturing when playback started — a call, a
+recording left running — is left alone, because silencing the plugin for the
+length of a meeting is not what anyone asked for. And where CoreAudio will not
+answer, nothing is cut at all; `speak doctor` says whether this machine can
+tell. Set `stop_on_mic` to `false` to turn it off.
+
+What the microphone interrupts is not thrown away: the rest of the summary is
+kept, waits `mute_backoff_seconds`, and resumes at the fragment it stopped on.
+A new prompt is the one thing that does discard it — by then the summary
+answers the wrong question.
 
 ## Requirements
 
@@ -163,9 +174,9 @@ stopped working". `/speaker:voices` marks those with `[needs a paid plan]`, and
 Voice cloning (instant and professional) is a paid feature too, so a cloned voice
 of your own is not an option on the free plan. A free account also gets 10,000
 characters a month. The plugin is built to spend little of it: what is spoken is
-a summary capped at `summary_chars` (420 by default, `max_chars` 700 in `full`
-mode), identical text is served from the local mp3 cache instead of being billed
-twice, and nothing is synthesized while the session is silenced.
+a summary, capped as a whole at `max_total_chars` (3000), identical text is
+served from the local mp3 cache instead of being billed twice, and nothing is
+synthesized while the session is silenced.
 
 ### Model and audio
 
@@ -229,8 +240,13 @@ comes back is dropped after `pin_ttl_days` (30). `speak sessions` shows those as
 
 | Mode | Spoken |
 | --- | --- |
-| `smart` (default) | the section titled Resumo / Decisões / Próximos passos if there is one, otherwise the opening line, the questions left for you and the closing paragraph — capped at `summary_chars` (420) |
-| `full` | the whole answer, capped at `max_chars` (700) |
+| `smart` (default) | the section titled Resumo / Decisões / Próximos passos if there is one, otherwise the opening line, the questions left for you and the closing paragraph |
+| `full` | the whole answer |
+
+Whatever the mode picks is spoken in full, up to `max_total_chars` (3000). A
+summary longer than `summary_chars` is split into fragments at sentence
+boundaries and said in order — the limit sizes a fragment, it does not cut the
+answer short.
 | `manual` | nothing, unless Claude left a line with `speak note "..."` |
 
 Separately from the modes, a prompt is acknowledged the moment it is submitted:
@@ -259,17 +275,22 @@ the note and speaks it instead of the answer. Code blocks and tables never reach
 | `model_id` | `eleven_turbo_v2_5` | `eleven_flash_v2_5` is cheaper and faster |
 | `language_code` | `pt` | sent only for turbo/flash models |
 | `say_voice` | `Luciana` | fallback macOS voice |
-| `max_chars` | `700` | hard cap per utterance (ElevenLabs bills per character) |
+| `max_chars` | `700` | cap per utterance in `full` mode (ElevenLabs bills per character) |
 | `summary_mode` | `smart` | `smart` / `full` / `manual` — see *What gets spoken* |
-| `summary_chars` | `420` | cap for the summary modes |
+| `summary_chars` | `420` | size of one spoken fragment, not a cap on the answer |
+| `max_total_chars` | `3000` | ceiling on a whole spoken answer |
 | `session_default` | `on` | what a session does before anyone runs `speak on`/`off` in it |
 | `pin_ttl_days` | `30` | how long the pin of an ended session is kept for a resume; `0` keeps it forever |
 | `queue_policy` | `latest` | `latest` speaks only the newest message per session, except that a notification never discards an unspoken summary; `all` speaks every one |
 | `notifications` | `true` | also speak permission prompts and idle notifications |
 | `speak_when_focused` | `true` | `false` = only speak messages produced while the tab was *not* in front |
-| `stop_on_blur` | `true` | leaving the tab interrupts the audio (it retries on return, up to 3×) |
+| `stop_on_blur` | `true` | leaving the tab interrupts the audio; it resumes where it stopped when you come back |
 | `stop_on_prompt` | `true` | submitting a new prompt cuts what this session is saying, and counts it as spoken |
-| `stop_on_mic` | `true` | the microphone going live cuts what is being said, so dictation does not transcribe the voice |
+| `stop_on_mic` | `true` | the microphone going live pauses what is being said, so dictation does not transcribe the voice; the rest is kept and resumed |
+| `blur_grace_polls` | `3` | consecutive polls that must agree the tab is gone before the audio is cut |
+| `mic_grace_polls` | `2` | consecutive readings that must agree the microphone is capturing |
+| `mute_backoff_seconds` | `5.0` | how long a summary waits after the microphone cut it short |
+| `max_attempts` | `6` | attempts before a queued item is given up on (progress is kept between them) |
 | `ack` | `true` | say a short line when a prompt is submitted, before the turn's own answer |
 | `ack_phrases` | – | your own lines to draw from; empty means the built-in set for `language_code` |
 | `ack_ttl_seconds` | `20` | an acknowledgement older than this is dropped unspoken |
@@ -285,8 +306,10 @@ the note and speaks it instead of the answer. Code blocks and tables never reach
 Markdown is turned into something worth listening to before it reaches the API:
 code fences become "bloco de código", links and URLs collapse, long paths shrink
 to the file name, headings/bullets/tables/emoji are stripped, and the result is
-truncated at a sentence boundary within `max_chars`. Identical text is cached on
-disk, so repeats and retries cost nothing.
+split into fragments of at most `summary_chars`, cut at sentence boundaries and
+spoken in order, up to `max_total_chars` in total. Identical text is cached on
+disk, so repeats and retries cost nothing — and a fragment already said is not
+said again when playback resumes.
 
 ## State, and what leaves the machine
 
