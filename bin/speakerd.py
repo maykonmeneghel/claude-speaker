@@ -137,9 +137,20 @@ def main() -> int:
                     core.drop_queue_item(item)
                     core.log(f"dropped item: session={item.get('session_id','?')[:8]} is off")
                     continue
-                if not cfg.get("speak_when_focused", True) and item.get("focused_at_creation"):
+                # An acknowledgement exists to answer a prompt the user just
+                # typed, so of course the tab was in front: speak_when_focused
+                # must not silence it.
+                if (not cfg.get("speak_when_focused", True)
+                        and item.get("focused_at_creation")
+                        and not item.get("always")):
                     core.drop_queue_item(item)
                     continue
+                if item.get("kind") == "ack":
+                    age = time.time() - float(item.get("created_at", 0))
+                    if age > float(cfg.get("ack_ttl_seconds", 20)):
+                        core.drop_queue_item(item)
+                        core.log(f"dropped a stale ack ({age:.0f}s old)")
+                        continue
 
                 text = item.get("text", "")
                 attempts = int(item.get("attempts", 0)) + 1

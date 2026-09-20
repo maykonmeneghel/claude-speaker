@@ -112,6 +112,18 @@ def main() -> int:
         if dropped:
             core.log(f"prompt hook: session={short} dropped {dropped} stale "
                      f"summary(ies), the user is back")
+
+        # Say something immediately, so a turn that takes a minute does not
+        # feel like the prompt went unheard. Nothing is synthesized here: this
+        # hook runs before Claude sees the prompt, and waiting on the API would
+        # delay the turn itself. The daemon speaks it a moment later, from the
+        # cache once each phrase has been heard once.
+        if cfg.get("ack", True) and core.enabled(session_id):
+            phrase = core.pick_ack_phrase(cfg, session_id)
+            if phrase and core.enqueue(phrase, session_id, "ack", {"always": True}):
+                core.remember_ack(session_id, phrase)
+                core.log(f"prompt hook: session={short} queued ack")
+                core.ensure_daemon()
         return 0
 
     if not core.enabled(session_id):

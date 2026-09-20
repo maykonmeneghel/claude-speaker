@@ -5,6 +5,28 @@ the single source of truth: bump it in a pull request, and merging that pull
 request tags `speaker--v<version>` and publishes the release. The section a
 release uses for its notes is the one whose heading matches its version.
 
+## 0.8.0
+
+- **A prompt is now acknowledged out loud as it is submitted.** A turn that
+  takes a minute used to pass in silence, which is indistinguishable from not
+  having been heard at all — especially when the prompt was dictated. The
+  `UserPromptSubmit` hook now queues a short line ("Ok, deixa comigo") that the
+  daemon speaks while the turn gets going; the summary still follows at the end,
+  unchanged.
+
+  The line is drawn at random from `ack_phrases`, never repeating the previous
+  one, and the built-in set follows `language_code`. Nothing is synthesized in
+  the hook itself — it runs before Claude sees the prompt, and waiting on the
+  API there would delay the turn — so the daemon does it, and from the mp3 cache
+  once each phrase has been heard once. A fixed set of lines is therefore billed
+  once and never again.
+
+  An acknowledgement is dropped unspoken once it is older than `ack_ttl_seconds`
+  (20), because one that arrives late says the opposite of what it means, and a
+  real summary always outranks one still waiting. It also ignores
+  `speak_when_focused`: the tab was obviously in front, since the user had just
+  typed in it. Set `ack` to `false` to turn it off.
+
 ## 0.7.0
 
 - **The voice stops when the microphone goes live.** Dictating a prompt while

@@ -10,6 +10,7 @@ import ctypes
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
 import struct
@@ -62,6 +63,10 @@ DEFAULT_CONFIG = {
     "stop_on_prompt": True,
     # so does the microphone going live: dictation must not transcribe the voice
     "stop_on_mic": True,
+    # a short "got it" the moment a prompt is submitted
+    "ack": True,
+    "ack_phrases": [],       # empty: the built-in set for language_code
+    "ack_ttl_seconds": 20,   # an acknowledgement spoken late is worse than none
     "prefetch": True,
     # focus detection: auto | tty | app
     "focus_strategy": "auto",
@@ -922,23 +927,62 @@ def microphone_live() -> bool | None:
     return None if running is None else bool(running)
 
 
-def request_cancel(session_id: str) -> None:
-    """Record that what this session is being told is no longer wanted.
-
-    A timestamp rather than a flag, so an utterance that starts *after* the
-    request is left alone: only playback older than the mark is cut."""
+def _patch_session(session_id: str, **fields) -> None:
+    """Merge `fields` into the session file, leaving everything else alone."""
     if not session_id:
         return
     ensure_dirs()
     path = session_file(session_id)
     data = read_session(session_id)
     data["session_id"] = session_id
-    data["cancel_at"] = time.time()
+    data.update(fields)
     try:
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     except OSError:
         return
     _private(path)
+
+
+ACK_PHRASES = {
+    "pt": [
+        "Beleza, entendi. Vou atrás disso.",
+        "Ok, deixa comigo.",
+        "Certo, já estou olhando.",
+        "Anotado. Vou trabalhar nisso.",
+        "Perfeito, vou verificar.",
+    ],
+    "en": [
+        "Got it, on it.",
+        "Okay, let me look into that.",
+        "Right, give me a moment.",
+        "Understood, working on it.",
+        "Sure, checking that now.",
+    ],
+}
+
+
+def pick_ack_phrase(cfg: dict, session_id: str = "") -> str:
+    """A short line to say the prompt was heard, avoiding the last one used."""
+    phrases = [str(p).strip() for p in (cfg.get("ack_phrases") or []) if str(p).strip()]
+    if not phrases:
+        lang = str(cfg.get("language_code", "pt")).lower().split("-")[0]
+        phrases = ACK_PHRASES.get(lang) or ACK_PHRASES["en"]
+    if len(phrases) < 2:
+        return phrases[0] if phrases else ""
+    last = read_session(session_id).get("last_ack") if session_id else None
+    return random.choice([p for p in phrases if p != last] or phrases)
+
+
+def remember_ack(session_id: str, phrase: str) -> None:
+    _patch_session(session_id, last_ack=phrase)
+
+
+def request_cancel(session_id: str) -> None:
+    """Record that what this session is being told is no longer wanted.
+
+    A timestamp rather than a flag, so an utterance that starts *after* the
+    request is left alone: only playback older than the mark is cut."""
+    _patch_session(session_id, cancel_at=time.time())
 
 
 def cancel_requested(session_id: str, since: float) -> bool:
