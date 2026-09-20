@@ -17,6 +17,7 @@ SessionStart hook ──► speakerd (one daemon, all sessions)
                       └──► tab tty == item tty ──► ElevenLabs ──► afplay
 
 UserPromptSubmit hook ──► cuts what is playing, drops what is unspoken
+microphone goes live ──► cuts mid-sentence (dictation must not hear the voice)
 ```
 
 A queued summary only stays worth hearing while you are away. Three rules keep
@@ -37,6 +38,28 @@ left alone. Set `stop_on_prompt` to `false` to let every summary finish.
 Claude Code has no hook on a keystroke, so the earliest moment anything can
 react to you is `UserPromptSubmit`, which fires when the prompt is submitted —
 not while you type it.
+
+## Dictation
+
+That limit matters if you talk to Claude instead of typing. Press the dictation
+key while the voice is still speaking and the microphone transcribes *it*, so
+your prompt arrives with a sentence of Claude's own answer glued to the front;
+by the time `UserPromptSubmit` could cut the audio, the damage is already in the
+transcript.
+
+So the plugin watches the microphone rather than the keyboard. CoreAudio
+publishes `kAudioDevicePropertyDeviceIsRunningSomewhere` for the default input
+device, which turns true the moment *any* process starts capturing. Reading it
+is a property query and not a recording: it needs no microphone permission and
+puts nothing in the menu bar. The voice stops when you start talking, whatever
+you are dictating with — Claude Code, macOS dictation, or an app of your own.
+
+Only a rising edge during an utterance counts. A microphone that was already
+capturing when playback started — a call, a recording left running — is left
+alone, because silencing the plugin for the length of a meeting is not what
+anyone asked for. And where CoreAudio will not answer, nothing is cut at all;
+`speak doctor` says whether this machine can tell. Set `stop_on_mic` to `false`
+to turn it off.
 
 ## Requirements
 
@@ -233,6 +256,7 @@ the note and speaks it instead of the answer. Code blocks and tables never reach
 | `speak_when_focused` | `true` | `false` = only speak messages produced while the tab was *not* in front |
 | `stop_on_blur` | `true` | leaving the tab interrupts the audio (it retries on return, up to 3×) |
 | `stop_on_prompt` | `true` | submitting a new prompt cuts what this session is saying, and counts it as spoken |
+| `stop_on_mic` | `true` | the microphone going live cuts what is being said, so dictation does not transcribe the voice |
 | `prefetch` | `true` | synthesize at Stop time so playback is instant when you come back |
 | `focus_strategy` | `auto` | `tty` (exact tab, needs AppleScript) / `app` (terminal app in front) |
 | `poll_interval` | `0.6` | seconds between focus checks |

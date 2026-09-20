@@ -6,11 +6,13 @@ reinstalling or updating the plugin never wipes the queue or the config.
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -58,6 +60,8 @@ DEFAULT_CONFIG = {
     "stop_on_blur": True,
     # submitting a new prompt cuts whatever this session is still saying
     "stop_on_prompt": True,
+    # so does the microphone going live: dictation must not transcribe the voice
+    "stop_on_mic": True,
     "prefetch": True,
     # focus detection: auto | tty | app
     "focus_strategy": "auto",
@@ -858,6 +862,66 @@ def play_say(text: str, cfg: dict) -> subprocess.Popen | None:
         return None
 
 
+# --------------------------------------------------------------------------- #
+# microphone: is anything capturing right now? (CoreAudio)
+# --------------------------------------------------------------------------- #
+
+_CORE_AUDIO: object = "unset"
+
+
+def _core_audio():
+    """The CoreAudio framework, or None where it cannot be loaded."""
+    global _CORE_AUDIO
+    if _CORE_AUDIO == "unset":
+        try:
+            _CORE_AUDIO = ctypes.CDLL(
+                "/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
+        except OSError:
+            _CORE_AUDIO = None
+    return _CORE_AUDIO
+
+
+class _AudioAddress(ctypes.Structure):
+    _fields_ = [("selector", ctypes.c_uint32),
+                ("scope", ctypes.c_uint32),
+                ("element", ctypes.c_uint32)]
+
+
+def _fourcc(code: str) -> int:
+    return struct.unpack(">I", code.encode("ascii"))[0]
+
+
+def _audio_u32(obj: int, selector: int) -> int | None:
+    """One UInt32 audio object property, or None if it cannot be read."""
+    ca = _core_audio()
+    if ca is None:
+        return None
+    addr = _AudioAddress(selector, _fourcc("glob"), 0)  # scope global, element main
+    out = ctypes.c_uint32(0)
+    size = ctypes.c_uint32(ctypes.sizeof(out))
+    try:
+        status = ca.AudioObjectGetPropertyData(
+            ctypes.c_uint32(obj), ctypes.byref(addr), ctypes.c_uint32(0), None,
+            ctypes.byref(size), ctypes.byref(out))
+    except Exception:  # a framework that answers differently must not break audio
+        return None
+    return out.value if status == 0 else None
+
+
+def microphone_live() -> bool | None:
+    """Whether some process is capturing from the default input device.
+
+    Reading kAudioDevicePropertyDeviceIsRunningSomewhere is a property query,
+    not a recording, so it needs no microphone permission and shows nothing in
+    the menu bar. None means CoreAudio would not answer — callers must not read
+    that as "quiet", or a machine that cannot tell would cut every utterance."""
+    device = _audio_u32(1, _fourcc("dIn "))  # system object -> default input
+    if not device:
+        return None
+    running = _audio_u32(device, _fourcc("gone"))
+    return None if running is None else bool(running)
+
+
 def request_cancel(session_id: str) -> None:
     """Record that what this session is being told is no longer wanted.
 
@@ -915,15 +979,29 @@ def speak_blocking(text: str, cfg: dict | None = None, should_continue=None,
         encoding="utf-8")
     _private(NOW_PLAYING)
     last_poll = started_at
+    watch_mic = bool(cfg.get("stop_on_mic", True))
+    # A microphone already capturing when the utterance starts — a call, a
+    # recording — must not silence the plugin outright. Only a rising edge
+    # during playback means someone has just started talking to Claude.
+    mic_was_live = microphone_live() if watch_mic else None
     try:
         while proc.poll() is None:
             if should_continue and not should_continue():
                 _end_playback(proc)
                 return "aborted"
+            if watch_mic:
+                live = microphone_live()
+                if live is not None:
+                    if live and mic_was_live is False:
+                        log("playback cut: the microphone went live")
+                        _end_playback(proc)
+                        return "cancelled"
+                    mic_was_live = live
             now = time.time()
             if session_id and now - last_poll >= 0.25:
                 last_poll = now
                 if cancel_requested(session_id, started_at):
+                    log("playback cut: a new prompt was submitted")
                     _end_playback(proc)
                     return "cancelled"
             time.sleep(0.15)
