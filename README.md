@@ -173,7 +173,10 @@ The same things work from a shell, without Claude: `~/claude-speaker/bin/speak s
 `speak auto` drops a session's pin so it follows the default again, and `speak sessions`
 prints the three levels side by side. Outside a Claude session, `speak` finds the session
 by `CLAUDE_CODE_SESSION_ID`, then by the terminal tab it runs in; `--session <id>` is always
-available. A session's pin lives in its file under `sessions/` and disappears when it ends.
+available. A session's pin lives in its file under `sessions/` and survives the end of the
+session: a resumed session speaks exactly as you left it, and the pin of a session that never
+comes back is dropped after `pin_ttl_days` (30). `speak sessions` shows those as
+`ended … pin kept for a resume`.
 
 ## What gets spoken
 
@@ -203,6 +206,7 @@ the note and speaks it instead of the answer. Code blocks and tables never reach
 | `summary_mode` | `smart` | `smart` / `full` / `manual` — see *What gets spoken* |
 | `summary_chars` | `420` | cap for the summary modes |
 | `session_default` | `on` | what a session does before anyone runs `speak on`/`off` in it |
+| `pin_ttl_days` | `30` | how long the pin of an ended session is kept for a resume; `0` keeps it forever |
 | `queue_policy` | `latest` | `latest` speaks only the newest message per session; `all` speaks every one |
 | `notifications` | `true` | also speak permission prompts and idle notifications |
 | `speak_when_focused` | `true` | `false` = only speak messages produced while the tab was *not* in front |
@@ -261,7 +265,3 @@ to reset, and remove the key with
   app-level focus (`focus_strategy=app`).
 - `tmux`/`screen` panes report the tty of the outer terminal, so a session inside
   a multiplexer is matched at window level, not pane level.
-- A session's `on`/`off` pin lives in its session file, and the `SessionEnd` hook
-  deletes that file. A session that ends and is then resumed comes back on
-  `session_default`, so a `/speaker:on` from before the resume is forgotten. Set
-  `speak default on` if you would rather not run it again.

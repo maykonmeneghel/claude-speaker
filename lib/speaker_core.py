@@ -49,6 +49,7 @@ DEFAULT_CONFIG = {
     "summary_mode": "smart",
     "summary_chars": 420,
     # sessions with no explicit on/off of their own: on | off
+    "pin_ttl_days": 30,
     "session_default": "on",
     # queue behaviour: latest (speak only the newest pending item) | all
     "queue_policy": "latest",
@@ -195,14 +196,37 @@ def enabled(session_id: str | None = None) -> bool:
     return str(load_config().get("session_default", "on")).lower() != "off"
 
 
-def known_sessions() -> list[dict]:
+def known_sessions(include_ended: bool = False) -> list[dict]:
+    """Live sessions, newest first. Ended ones are kept only for their pin."""
     out = []
     for path in SESSIONS_DIR.glob("*.json"):
         try:
-            out.append(json.loads(path.read_text(encoding="utf-8")))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
+        if data.get("ended") and not include_ended:
+            continue
+        out.append(data)
     return sorted(out, key=lambda d: d.get("updated_at", 0), reverse=True)
+
+
+def prune_session_pins(cfg: dict | None = None) -> None:
+    """Forget pins of sessions that ended long enough ago to be irrelevant."""
+    cfg = cfg or load_config()
+    try:
+        days = float(cfg.get("pin_ttl_days", 30))
+    except (TypeError, ValueError):
+        days = 30.0
+    if days <= 0:
+        return
+    cutoff = time.time() - days * 86400
+    for path in SESSIONS_DIR.glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if data.get("ended") and float(data.get("ended_at", 0) or 0) < cutoff:
+            path.unlink(missing_ok=True)
 
 
 def resolve_session_id(explicit: str | None = None) -> str:
@@ -321,6 +345,9 @@ def register_session(session_id: str, extra: dict | None = None) -> dict:
         except ValueError:
             data = {}
     tty = tty_of_process_chain()
+    # a resumed session is live again: clear the flags forget_session left
+    data.pop("ended", None)
+    data.pop("ended_at", None)
     data.update({
         "session_id": session_id,
         "tty": tty or data.get("tty", ""),
@@ -334,6 +361,7 @@ def register_session(session_id: str, extra: dict | None = None) -> dict:
         data.update(extra)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     _private(path)
+    prune_session_pins()
     return data
 
 
@@ -345,7 +373,23 @@ def read_session(session_id: str) -> dict:
 
 
 def forget_session(session_id: str) -> None:
-    session_file(session_id).unlink(missing_ok=True)
+    """Drop what is only true while the session runs, but keep an explicit pin.
+
+    SessionEnd fires whenever a session ends, and a resumed session comes back
+    under the same id — deleting the file threw the user's `speak on` away with
+    the tty, so the voice they had turned on came back silent on the default.
+    What is kept is the pin alone, flagged as ended so a stale one can be pruned
+    and so it does not look like a live session anywhere.
+    """
+    path = session_file(session_id)
+    state = session_state(session_id)
+    if state:
+        kept = {"session_id": session_id, "speak": state,
+                "ended": True, "ended_at": time.time()}
+        path.write_text(json.dumps(kept, indent=2, ensure_ascii=False), encoding="utf-8")
+        _private(path)
+    else:
+        path.unlink(missing_ok=True)
     for item in list_queue():
         if item.get("session_id") == session_id:
             drop_queue_item(item)

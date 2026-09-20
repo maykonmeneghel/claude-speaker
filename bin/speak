@@ -211,10 +211,14 @@ def cmd_sessions(_args: list[str]) -> int:
     current = core.resolve_session_id()
     print(f"master switch : {'ON' if core.global_enabled() else 'OFF'}")
     print(f"session_default: {cfg.get('session_default', 'on')}")
-    for sess in core.known_sessions():
+    for sess in core.known_sessions(include_ended=True):
         sid = sess.get("session_id", "?")
         state = core.session_state(sid) or f"default ({cfg.get('session_default','on')})"
         here = " <- this tab" if sid == current else ""
+        if sess.get("ended"):
+            age = _fmt_age(float(sess.get("ended_at", 0) or 0))
+            print(f"  {sid[:8]}  speak={state:<22} ended {age} ago, pin kept for a resume")
+            continue
         print(f"  {sid[:8]}  speak={state:<22} tty={sess.get('tty') or '?'} "
               f"cwd={sess.get('cwd') or '?'}{here}")
     return 0
