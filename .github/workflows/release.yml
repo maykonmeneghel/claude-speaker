@@ -1,0 +1,95 @@
+name: Release
+
+# The version in .claude-plugin/plugin.json is the single source of truth.
+# Bump it in a pull request; merging that PR publishes the release.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.claude-plugin/plugin.json'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read the plugin manifest
+        id: manifest
+        run: |
+          set -euo pipefail
+          name=$(jq -r '.name' .claude-plugin/plugin.json)
+          version=$(jq -r '.version' .claude-plugin/plugin.json)
+          if [ -z "$name" ] || [ "$name" = "null" ]; then
+            echo "plugin.json has no name" >&2
+            exit 1
+          fi
+          case "$version" in
+            [0-9]*.[0-9]*.[0-9]*) : ;;
+            *) echo "version '$version' is not semver" >&2; exit 1 ;;
+          esac
+          # The marketplace entry must point at this plugin, or an install
+          # resolves to something else than what is being tagged.
+          entry=$(jq -r --arg n "$name" '.plugins[] | select(.name == $n) | .name' .claude-plugin/marketplace.json)
+          if [ "$entry" != "$name" ]; then
+            echo "marketplace.json has no entry named '$name'" >&2
+            exit 1
+          fi
+          {
+            echo "name=$name"
+            echo "version=$version"
+            echo "tag=${name}--v${version}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Skip when this version was already released
+        id: gate
+        env:
+          TAG: ${{ steps.manifest.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "$TAG already exists, nothing to release"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tag the release
+        if: steps.gate.outputs.release == 'true'
+        env:
+          TAG: ${{ steps.manifest.outputs.tag }}
+          VERSION: ${{ steps.manifest.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "speaker $VERSION"
+          git push origin "$TAG"
+
+      - name: Publish the release
+        if: steps.gate.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.manifest.outputs.tag }}
+          VERSION: ${{ steps.manifest.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Prefer the hand-written section in CHANGELOG.md; fall back to the
+          # notes GitHub generates from the commits since the previous tag.
+          notes=$(awk -v v="## $VERSION" '
+            $0 == v {found = 1; next}
+            found && /^## / {exit}
+            found {print}
+          ' CHANGELOG.md 2>/dev/null || true)
+          if [ -n "${notes//[[:space:]]/}" ]; then
+            printf '%s\n' "$notes" > /tmp/notes.md
+            gh release create "$TAG" --title "speaker $VERSION" --notes-file /tmp/notes.md
+          else
+            gh release create "$TAG" --title "speaker $VERSION" --generate-notes
+          fi
